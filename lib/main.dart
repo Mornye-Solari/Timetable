@@ -60,7 +60,6 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
-/// 主界面：包含底部 3 个板块（日程、课表、我的）
 class MainScreen extends StatefulWidget {
   final bool isEnglish;
   final ValueChanged<ThemeMode> onThemeChanged;
@@ -80,11 +79,10 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  int _currentIndex = 1; // 默认停留在“课表”页（第2个）
+  int _currentIndex = 1;
 
   @override
   Widget build(BuildContext context) {
-    // 根据语言定义底栏文字
     final labels = widget.isEnglish
         ? ['Schedule', 'Timetable', 'Profile']
         : ['日程', '课表', '我的'];
@@ -128,7 +126,6 @@ class _MainScreenState extends State<MainScreen> {
   }
 }
 
-/// 1. 日程页面（预留）
 class SchedulePage extends StatelessWidget {
   final bool isEnglish;
   const SchedulePage({super.key, required this.isEnglish});
@@ -144,7 +141,6 @@ class SchedulePage extends StatelessWidget {
   }
 }
 
-/// 2. 核心课表页面（纯净风，参考高颜值截图）
 class TimetablePage extends StatefulWidget {
   final bool isEnglish;
   const TimetablePage({super.key, required this.isEnglish});
@@ -163,8 +159,7 @@ class _TimetablePageState extends State<TimetablePage> {
   }
 
   void _loadData() {
-    // 自动从 Rust 加载第 1 周课程
-    final list = getCoursesForWeek(week: 1);
+    final list = getCoursesForWeek(week: 7);
     setState(() {
       _courses = list;
     });
@@ -179,34 +174,32 @@ class _TimetablePageState extends State<TimetablePage> {
           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
         ),
         elevation: 0,
-        centerTitle: false,
         actions: [
           IconButton(
             icon: const Icon(Icons.add),
             tooltip: widget.isEnglish ? 'Add Course' : '添加课程',
-            onPressed: () {
-              // 之后这里跳到添加课程表单
+            onPressed: () async {
+              final result = await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) =>
+                      AddCoursePage(isEnglish: widget.isEnglish),
+                ),
+              );
+              if (result == true) {
+                _loadData();
+              }
             },
           ),
         ],
       ),
       body: _courses.isEmpty
           ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    widget.isEnglish
-                        ? 'No timetable, import or add one'
-                        : '无课表，可手动添加或一键导入',
-                    style: const TextStyle(color: Colors.grey),
-                  ),
-                  const SizedBox(height: 12),
-                  ElevatedButton(
-                    onPressed: _loadData,
-                    child: Text(widget.isEnglish ? 'Load Data' : '加载测试课程'),
-                  ),
-                ],
+              child: Text(
+                widget.isEnglish
+                    ? 'No courses, click "+" on top to add'
+                    : '暂无课程，请点击右上角 "+" 添加',
+                style: const TextStyle(color: Colors.grey),
               ),
             )
           : ListView.builder(
@@ -214,14 +207,6 @@ class _TimetablePageState extends State<TimetablePage> {
               itemCount: _courses.length,
               itemBuilder: (context, index) {
                 final course = _courses[index];
-                // 根据语言动态显示课程名
-                final courseName = widget.isEnglish && course.name == '软件工程课'
-                    ? 'Software Engineering'
-                    : course.name;
-                final teacherName = widget.isEnglish && course.teacher == '老师'
-                    ? 'Professor'
-                    : course.teacher;
-
                 return Card(
                   elevation: 2,
                   margin: const EdgeInsets.symmetric(vertical: 6),
@@ -232,12 +217,15 @@ class _TimetablePageState extends State<TimetablePage> {
                     leading: CircleAvatar(
                       backgroundColor: Colors.blue.shade100,
                       child: Text(
-                        '${course.weekday}',
-                        style: const TextStyle(color: Colors.blueAccent),
+                        '周${course.weekday}',
+                        style: const TextStyle(
+                          color: Colors.blueAccent,
+                          fontSize: 12,
+                        ),
                       ),
                     ),
                     title: Text(
-                      courseName,
+                      course.name,
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
@@ -245,15 +233,11 @@ class _TimetablePageState extends State<TimetablePage> {
                     ),
                     subtitle: Text(
                       widget.isEnglish
-                          ? 'Time: ${course.startTime} - ${course.endTime}\nLocation: ${course.location} | Teacher: $teacherName'
-                          : '时间: ${course.startTime} - ${course.endTime}\n地点: ${course.location} | 老师: $teacherName',
+                          ? 'Time: ${course.startTime} - ${course.endTime}\nLocation: ${course.location} | Teacher: ${course.teacher}'
+                          : '时间: ${course.startTime} - ${course.endTime}\n地点: ${course.location} | 老师: ${course.teacher}',
                     ),
                     isThreeLine: true,
-                    trailing: Text(
-                      widget.isEnglish
-                          ? '${course.credits} Cr'
-                          : '${course.credits}学分',
-                    ),
+                    trailing: Text('${course.credits} Cr'),
                   ),
                 );
               },
@@ -262,7 +246,164 @@ class _TimetablePageState extends State<TimetablePage> {
   }
 }
 
-/// 3. “我的”板块：把设置、语言、主题全部收纳在这里（符合高级 APP 规范）
+class AddCoursePage extends StatefulWidget {
+  final bool isEnglish;
+  const AddCoursePage({super.key, required this.isEnglish});
+
+  @override
+  State<AddCoursePage> createState() => _AddCoursePageState();
+}
+
+class _AddCoursePageState extends State<AddCoursePage> {
+  final _nameController = TextEditingController();
+  final _locationController = TextEditingController();
+  final _teacherController = TextEditingController();
+
+  int _weekday = 1;
+  double _credits = 3.0;
+  final int _startWeek = 1;
+  final int _endWeek = 16;
+  final String _startTime = "08:00";
+  final String _endTime = "09:40";
+
+  void _saveCourse() {
+    if (_nameController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            widget.isEnglish ? 'Please enter course name' : '请输入课程名称',
+          ),
+        ),
+      );
+      return;
+    }
+
+    // 注意这里传参名称已对应桥接后的驼峰命名
+    final newCourse = Course(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      name: _nameController.text.trim(),
+      color: "#3F51B5",
+      credits: _credits,
+      startWeek: _startWeek,
+      endWeek: _endWeek,
+      weekday: _weekday,
+      totalSections: 2,
+      hasBreak: true,
+      startTime: _startTime,
+      endTime: _endTime,
+      location: _locationController.text.trim().isEmpty
+          ? '教室'
+          : _locationController.text.trim(),
+      teacher: _teacherController.text.trim().isEmpty
+          ? '老师'
+          : _teacherController.text.trim(),
+      remark: '',
+      enableReminder: true,
+      reminderMinutes: 15,
+      reminderCount: 1,
+    );
+
+    addCourse(course: newCourse);
+    Navigator.pop(context, true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.isEnglish ? 'Add Course' : '手动添加课程'),
+        actions: [
+          IconButton(icon: const Icon(Icons.check), onPressed: _saveCourse),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
+            controller: _nameController,
+            decoration: InputDecoration(
+              labelText: widget.isEnglish ? 'Course Name' : '课程名称',
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _locationController,
+                  decoration: InputDecoration(
+                    labelText: widget.isEnglish
+                        ? 'Location (e.g. A302)'
+                        : '教室地址 (如 A302)',
+                    border: const OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: TextField(
+                  controller: _teacherController,
+                  decoration: InputDecoration(
+                    labelText: widget.isEnglish ? 'Teacher' : '任课老师',
+                    border: const OutlineInputBorder(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<int>(
+            value: _weekday,
+            decoration: InputDecoration(
+              labelText: widget.isEnglish ? 'Weekday' : '星期几',
+              border: const OutlineInputBorder(),
+            ),
+            items: List.generate(7, (index) {
+              int day = index + 1;
+              String label = widget.isEnglish ? 'Monday' : '星期一';
+              if (day == 2) label = widget.isEnglish ? 'Tuesday' : '星期二';
+              if (day == 3) label = widget.isEnglish ? 'Wednesday' : '星期三';
+              if (day == 4) label = widget.isEnglish ? 'Thursday' : '星期四';
+              if (day == 5) label = widget.isEnglish ? 'Friday' : '星期五';
+              if (day == 6) label = widget.isEnglish ? 'Saturday' : '星期六';
+              if (day == 7) label = widget.isEnglish ? 'Sunday' : '星期日';
+              return DropdownMenuItem(value: day, child: Text(label));
+            }),
+            onChanged: (val) => setState(() => _weekday = val ?? 1),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Text(widget.isEnglish ? 'Credits: ' : '学分数量: '),
+              Expanded(
+                child: Slider(
+                  value: _credits,
+                  min: 0.5,
+                  max: 6.0,
+                  divisions: 11,
+                  label: _credits.toString(),
+                  onChanged: (val) => setState(() => _credits = val),
+                ),
+              ),
+              Text(_credits.toString()),
+            ],
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size.fromHeight(50),
+            ),
+            onPressed: _saveCourse,
+            icon: const Icon(Icons.save),
+            label: Text(widget.isEnglish ? 'Save Course' : '保存课程'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class ProfilePage extends StatelessWidget {
   final bool isEnglish;
   final ValueChanged<ThemeMode> onThemeChanged;
@@ -298,7 +439,6 @@ class ProfilePage extends StatelessWidget {
           ),
           const SizedBox(height: 30),
           const Divider(),
-          // 语言切换选项
           ListTile(
             leading: const Icon(Icons.language),
             title: Text(isEnglish ? 'Language / 语言' : '语言 / Language'),
@@ -313,7 +453,6 @@ class ProfilePage extends StatelessWidget {
               },
             ),
           ),
-          // 主题模式选项
           ListTile(
             leading: const Icon(Icons.brightness_6),
             title: Text(isEnglish ? 'Theme Mode / 主题模式' : '主题模式 / Theme Mode'),

@@ -7,21 +7,21 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `COURSE_LIST`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `deref`, `fmt`, `initialize`
 
-/// 测试函数：前后端连通性测试
 String greet({required String name}) =>
     RustLib.instance.api.crateApiSimpleGreet(name: name);
 
-/// 初始化应用（对应报错里寻找的函数）
 void initApp() => RustLib.instance.api.crateApiSimpleInitApp();
 
-/// 检查课程时间冲突（预留函数）
 bool checkConflict() => RustLib.instance.api.crateApiSimpleCheckConflict();
 
-/// 获取某一週的课程列表（预留函数）
 List<Course> getCoursesForWeek({required int week}) =>
     RustLib.instance.api.crateApiSimpleGetCoursesForWeek(week: week);
+
+void addCourse({required Course course}) =>
+    RustLib.instance.api.crateApiSimpleAddCourse(course: course);
 
 /// 课程详细数据结构（对应你的构思第16条）
 class Course {
