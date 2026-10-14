@@ -7,70 +7,102 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `get_mock_courses`, `is_active_in_week`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
-/// 获取指定周次的全部有效课程（按星期和节次排序）
-List<CourseSlot> getCoursesForWeek({required int week}) =>
+/// 测试函数：前后端连通性测试
+String greet({required String name}) =>
+    RustLib.instance.api.crateApiSimpleGreet(name: name);
+
+/// 初始化应用（对应报错里寻找的函数）
+void initApp() => RustLib.instance.api.crateApiSimpleInitApp();
+
+/// 检查课程时间冲突（预留函数）
+bool checkConflict() => RustLib.instance.api.crateApiSimpleCheckConflict();
+
+/// 获取某一週的课程列表（预留函数）
+List<Course> getCoursesForWeek({required int week}) =>
     RustLib.instance.api.crateApiSimpleGetCoursesForWeek(week: week);
 
-/// 检测新课程与现有课程是否存在时间冲突（位掩码 + 区间重叠判定）
-String? checkConflict({
-  required int dayOfWeek,
-  required int startPeriod,
-  required int endPeriod,
-  required int weekMask,
-}) => RustLib.instance.api.crateApiSimpleCheckConflict(
-  dayOfWeek: dayOfWeek,
-  startPeriod: startPeriod,
-  endPeriod: endPeriod,
-  weekMask: weekMask,
-);
-
-/// 单节课程紧凑内存结构
-class CourseSlot {
-  final int id;
+/// 课程详细数据结构（对应你的构思第16条）
+class Course {
+  final String id;
   final String name;
+  final String color;
+  final double credits;
+  final int startWeek;
+  final int endWeek;
+  final int weekday;
+  final int totalSections;
+  final bool hasBreak;
+  final String startTime;
+  final String endTime;
   final String location;
   final String teacher;
-  final int dayOfWeek;
-  final int startPeriod;
-  final int endPeriod;
-  final int weekMask;
+  final String remark;
+  final bool enableReminder;
+  final int reminderMinutes;
+  final int reminderCount;
 
-  const CourseSlot({
+  const Course({
     required this.id,
     required this.name,
+    required this.color,
+    required this.credits,
+    required this.startWeek,
+    required this.endWeek,
+    required this.weekday,
+    required this.totalSections,
+    required this.hasBreak,
+    required this.startTime,
+    required this.endTime,
     required this.location,
     required this.teacher,
-    required this.dayOfWeek,
-    required this.startPeriod,
-    required this.endPeriod,
-    required this.weekMask,
+    required this.remark,
+    required this.enableReminder,
+    required this.reminderMinutes,
+    required this.reminderCount,
   });
 
   @override
   int get hashCode =>
       id.hashCode ^
       name.hashCode ^
+      color.hashCode ^
+      credits.hashCode ^
+      startWeek.hashCode ^
+      endWeek.hashCode ^
+      weekday.hashCode ^
+      totalSections.hashCode ^
+      hasBreak.hashCode ^
+      startTime.hashCode ^
+      endTime.hashCode ^
       location.hashCode ^
       teacher.hashCode ^
-      dayOfWeek.hashCode ^
-      startPeriod.hashCode ^
-      endPeriod.hashCode ^
-      weekMask.hashCode;
+      remark.hashCode ^
+      enableReminder.hashCode ^
+      reminderMinutes.hashCode ^
+      reminderCount.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is CourseSlot &&
+      other is Course &&
           runtimeType == other.runtimeType &&
           id == other.id &&
           name == other.name &&
+          color == other.color &&
+          credits == other.credits &&
+          startWeek == other.startWeek &&
+          endWeek == other.endWeek &&
+          weekday == other.weekday &&
+          totalSections == other.totalSections &&
+          hasBreak == other.hasBreak &&
+          startTime == other.startTime &&
+          endTime == other.endTime &&
           location == other.location &&
           teacher == other.teacher &&
-          dayOfWeek == other.dayOfWeek &&
-          startPeriod == other.startPeriod &&
-          endPeriod == other.endPeriod &&
-          weekMask == other.weekMask;
+          remark == other.remark &&
+          enableReminder == other.enableReminder &&
+          reminderMinutes == other.reminderMinutes &&
+          reminderCount == other.reminderCount;
 }

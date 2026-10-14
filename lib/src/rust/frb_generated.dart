@@ -57,9 +57,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
       RustLibWire.fromExternalLibrary;
 
   @override
-  Future<void> executeRustInitializers() async {
-    await api.crateApiSimpleInitApp();
-  }
+  Future<void> executeRustInitializers() async {}
 
   @override
   ExternalLibraryLoaderConfig get defaultExternalLibraryLoaderConfig =>
@@ -69,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -540260260;
+  int get rustContentHash => -249467996;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -81,16 +79,13 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
-  String? crateApiSimpleCheckConflict({
-    required int dayOfWeek,
-    required int startPeriod,
-    required int endPeriod,
-    required int weekMask,
-  });
+  bool crateApiSimpleCheckConflict();
 
-  List<CourseSlot> crateApiSimpleGetCoursesForWeek({required int week});
+  List<Course> crateApiSimpleGetCoursesForWeek({required int week});
 
-  Future<void> crateApiSimpleInitApp();
+  String crateApiSimpleGreet({required String name});
+
+  void crateApiSimpleInitApp();
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -102,50 +97,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
-  String? crateApiSimpleCheckConflict({
-    required int dayOfWeek,
-    required int startPeriod,
-    required int endPeriod,
-    required int weekMask,
-  }) {
+  bool crateApiSimpleCheckConflict() {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_u_8(dayOfWeek, serializer);
-          sse_encode_u_8(startPeriod, serializer);
-          sse_encode_u_8(endPeriod, serializer);
-          sse_encode_u_32(weekMask, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_String,
+          decodeSuccessData: sse_decode_bool,
           decodeErrorData: null,
         ),
         constMeta: kCrateApiSimpleCheckConflictConstMeta,
-        argValues: [dayOfWeek, startPeriod, endPeriod, weekMask],
+        argValues: [],
         apiImpl: this,
       ),
     );
   }
 
   TaskConstMeta get kCrateApiSimpleCheckConflictConstMeta =>
-      const TaskConstMeta(
-        debugName: "check_conflict",
-        argNames: ["dayOfWeek", "startPeriod", "endPeriod", "weekMask"],
-      );
+      const TaskConstMeta(debugName: "check_conflict", argNames: []);
 
   @override
-  List<CourseSlot> crateApiSimpleGetCoursesForWeek({required int week}) {
+  List<Course> crateApiSimpleGetCoursesForWeek({required int week}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_u_8(week, serializer);
+          sse_encode_u_32(week, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_list_course_slot,
+          decodeSuccessData: sse_decode_list_course,
           decodeErrorData: null,
         ),
         constMeta: kCrateApiSimpleGetCoursesForWeekConstMeta,
@@ -162,17 +145,35 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiSimpleInitApp() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
+  String crateApiSimpleGreet({required String name}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 3,
-            port: port_,
-          );
+          sse_encode_String(name, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiSimpleGreetConstMeta,
+        argValues: [name],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleGreetConstMeta =>
+      const TaskConstMeta(debugName: "greet", argNames: ["name"]);
+
+  @override
+  void crateApiSimpleInitApp() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -195,39 +196,54 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  CourseSlot dco_decode_course_slot(dynamic raw) {
+  bool dco_decode_bool(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as bool;
+  }
+
+  @protected
+  Course dco_decode_course(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
-    return CourseSlot(
-      id: dco_decode_u_32(arr[0]),
+    if (arr.length != 17)
+      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
+    return Course(
+      id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
-      location: dco_decode_String(arr[2]),
-      teacher: dco_decode_String(arr[3]),
-      dayOfWeek: dco_decode_u_8(arr[4]),
-      startPeriod: dco_decode_u_8(arr[5]),
-      endPeriod: dco_decode_u_8(arr[6]),
-      weekMask: dco_decode_u_32(arr[7]),
+      color: dco_decode_String(arr[2]),
+      credits: dco_decode_f_32(arr[3]),
+      startWeek: dco_decode_u_32(arr[4]),
+      endWeek: dco_decode_u_32(arr[5]),
+      weekday: dco_decode_u_8(arr[6]),
+      totalSections: dco_decode_u_32(arr[7]),
+      hasBreak: dco_decode_bool(arr[8]),
+      startTime: dco_decode_String(arr[9]),
+      endTime: dco_decode_String(arr[10]),
+      location: dco_decode_String(arr[11]),
+      teacher: dco_decode_String(arr[12]),
+      remark: dco_decode_String(arr[13]),
+      enableReminder: dco_decode_bool(arr[14]),
+      reminderMinutes: dco_decode_u_32(arr[15]),
+      reminderCount: dco_decode_u_32(arr[16]),
     );
   }
 
   @protected
-  List<CourseSlot> dco_decode_list_course_slot(dynamic raw) {
+  double dco_decode_f_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_course_slot).toList();
+    return raw as double;
+  }
+
+  @protected
+  List<Course> dco_decode_list_course(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_course).toList();
   }
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
-  }
-
-  @protected
-  String? dco_decode_opt_String(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_String(raw);
   }
 
   @protected
@@ -256,36 +272,66 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  CourseSlot sse_decode_course_slot(SseDeserializer deserializer) {
+  bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_id = sse_decode_u_32(deserializer);
+    return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  Course sse_decode_course(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
     var var_name = sse_decode_String(deserializer);
+    var var_color = sse_decode_String(deserializer);
+    var var_credits = sse_decode_f_32(deserializer);
+    var var_startWeek = sse_decode_u_32(deserializer);
+    var var_endWeek = sse_decode_u_32(deserializer);
+    var var_weekday = sse_decode_u_8(deserializer);
+    var var_totalSections = sse_decode_u_32(deserializer);
+    var var_hasBreak = sse_decode_bool(deserializer);
+    var var_startTime = sse_decode_String(deserializer);
+    var var_endTime = sse_decode_String(deserializer);
     var var_location = sse_decode_String(deserializer);
     var var_teacher = sse_decode_String(deserializer);
-    var var_dayOfWeek = sse_decode_u_8(deserializer);
-    var var_startPeriod = sse_decode_u_8(deserializer);
-    var var_endPeriod = sse_decode_u_8(deserializer);
-    var var_weekMask = sse_decode_u_32(deserializer);
-    return CourseSlot(
+    var var_remark = sse_decode_String(deserializer);
+    var var_enableReminder = sse_decode_bool(deserializer);
+    var var_reminderMinutes = sse_decode_u_32(deserializer);
+    var var_reminderCount = sse_decode_u_32(deserializer);
+    return Course(
       id: var_id,
       name: var_name,
+      color: var_color,
+      credits: var_credits,
+      startWeek: var_startWeek,
+      endWeek: var_endWeek,
+      weekday: var_weekday,
+      totalSections: var_totalSections,
+      hasBreak: var_hasBreak,
+      startTime: var_startTime,
+      endTime: var_endTime,
       location: var_location,
       teacher: var_teacher,
-      dayOfWeek: var_dayOfWeek,
-      startPeriod: var_startPeriod,
-      endPeriod: var_endPeriod,
-      weekMask: var_weekMask,
+      remark: var_remark,
+      enableReminder: var_enableReminder,
+      reminderMinutes: var_reminderMinutes,
+      reminderCount: var_reminderCount,
     );
   }
 
   @protected
-  List<CourseSlot> sse_decode_list_course_slot(SseDeserializer deserializer) {
+  double sse_decode_f_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getFloat32();
+  }
+
+  @protected
+  List<Course> sse_decode_list_course(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <CourseSlot>[];
+    var ans_ = <Course>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_course_slot(deserializer));
+      ans_.add(sse_decode_course(deserializer));
     }
     return ans_;
   }
@@ -295,17 +341,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
-  }
-
-  @protected
-  String? sse_decode_opt_String(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_String(deserializer));
-    } else {
-      return null;
-    }
   }
 
   @protected
@@ -332,39 +367,51 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  bool sse_decode_bool(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getUint8() != 0;
-  }
-
-  @protected
   void sse_encode_String(String self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
   }
 
   @protected
-  void sse_encode_course_slot(CourseSlot self, SseSerializer serializer) {
+  void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_u_32(self.id, serializer);
-    sse_encode_String(self.name, serializer);
-    sse_encode_String(self.location, serializer);
-    sse_encode_String(self.teacher, serializer);
-    sse_encode_u_8(self.dayOfWeek, serializer);
-    sse_encode_u_8(self.startPeriod, serializer);
-    sse_encode_u_8(self.endPeriod, serializer);
-    sse_encode_u_32(self.weekMask, serializer);
+    serializer.buffer.putUint8(self ? 1 : 0);
   }
 
   @protected
-  void sse_encode_list_course_slot(
-    List<CourseSlot> self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_course(Course self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.color, serializer);
+    sse_encode_f_32(self.credits, serializer);
+    sse_encode_u_32(self.startWeek, serializer);
+    sse_encode_u_32(self.endWeek, serializer);
+    sse_encode_u_8(self.weekday, serializer);
+    sse_encode_u_32(self.totalSections, serializer);
+    sse_encode_bool(self.hasBreak, serializer);
+    sse_encode_String(self.startTime, serializer);
+    sse_encode_String(self.endTime, serializer);
+    sse_encode_String(self.location, serializer);
+    sse_encode_String(self.teacher, serializer);
+    sse_encode_String(self.remark, serializer);
+    sse_encode_bool(self.enableReminder, serializer);
+    sse_encode_u_32(self.reminderMinutes, serializer);
+    sse_encode_u_32(self.reminderCount, serializer);
+  }
+
+  @protected
+  void sse_encode_f_32(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putFloat32(self);
+  }
+
+  @protected
+  void sse_encode_list_course(List<Course> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
-      sse_encode_course_slot(item, serializer);
+      sse_encode_course(item, serializer);
     }
   }
 
@@ -376,16 +423,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
-  }
-
-  @protected
-  void sse_encode_opt_String(String? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_String(self, serializer);
-    }
   }
 
   @protected
@@ -409,11 +446,5 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_i_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putInt32(self);
-  }
-
-  @protected
-  void sse_encode_bool(bool self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putUint8(self ? 1 : 0);
   }
 }
