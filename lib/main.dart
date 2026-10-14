@@ -165,6 +165,12 @@ class _TimetablePageState extends State<TimetablePage> {
     });
   }
 
+  String _getWeekdayLabel(int weekday, bool isEnglish) {
+    const zh = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    const en = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return isEnglish ? en[weekday] : zh[weekday];
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -207,6 +213,15 @@ class _TimetablePageState extends State<TimetablePage> {
               itemCount: _courses.length,
               itemBuilder: (context, index) {
                 final course = _courses[index];
+                // 动态国际化映射：默认课程名如果是软件工程课，英文下显示 Software Engineering
+                final displayName = widget.isEnglish && course.name == '软件工程课'
+                    ? 'Software Engineering'
+                    : course.name;
+                final displayTeacher =
+                    widget.isEnglish && course.teacher == '教授'
+                    ? 'Professor'
+                    : course.teacher;
+
                 return Card(
                   elevation: 2,
                   margin: const EdgeInsets.symmetric(vertical: 6),
@@ -217,15 +232,16 @@ class _TimetablePageState extends State<TimetablePage> {
                     leading: CircleAvatar(
                       backgroundColor: Colors.blue.shade100,
                       child: Text(
-                        '周${course.weekday}',
+                        _getWeekdayLabel(course.weekday, widget.isEnglish),
                         style: const TextStyle(
                           color: Colors.blueAccent,
-                          fontSize: 12,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
                     ),
                     title: Text(
-                      course.name,
+                      displayName,
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
@@ -233,8 +249,8 @@ class _TimetablePageState extends State<TimetablePage> {
                     ),
                     subtitle: Text(
                       widget.isEnglish
-                          ? 'Time: ${course.startTime} - ${course.endTime}\nLocation: ${course.location} | Teacher: ${course.teacher}'
-                          : '时间: ${course.startTime} - ${course.endTime}\n地点: ${course.location} | 老师: ${course.teacher}',
+                          ? 'Time: ${course.startTime} - ${course.endTime}\nLocation: ${course.location} | Teacher: $displayTeacher'
+                          : '时间: ${course.startTime} - ${course.endTime}\n地点: ${course.location} | 老师: $displayTeacher',
                     ),
                     isThreeLine: true,
                     trailing: Text('${course.credits} Cr'),
@@ -267,7 +283,8 @@ class _AddCoursePageState extends State<AddCoursePage> {
   final String _endTime = "09:40";
 
   void _saveCourse() {
-    if (_nameController.text.trim().isEmpty) {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -278,10 +295,9 @@ class _AddCoursePageState extends State<AddCoursePage> {
       return;
     }
 
-    // 注意这里传参名称已对应桥接后的驼峰命名
     final newCourse = Course(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
-      name: _nameController.text.trim(),
+      name: name,
       color: "#3F51B5",
       credits: _credits,
       startWeek: _startWeek,

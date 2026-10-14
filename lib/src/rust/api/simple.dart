@@ -23,7 +23,6 @@ List<Course> getCoursesForWeek({required int week}) =>
 void addCourse({required Course course}) =>
     RustLib.instance.api.crateApiSimpleAddCourse(course: course);
 
-/// 课程详细数据结构（对应你的构思第16条）
 class Course {
   final String id;
   final String name;
