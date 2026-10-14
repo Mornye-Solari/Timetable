@@ -161,7 +161,7 @@ class _TimetablePageState extends State<TimetablePage> {
     return isEnglish ? en[weekday] : zh[weekday];
   }
 
-  // 打开课程详情弹窗（支持 Google Map 跳转）
+  // 打开课程详情弹窗
   void _showCourseDetail(Course course) {
     showModalBottomSheet(
       context: context,
@@ -170,6 +170,20 @@ class _TimetablePageState extends State<TimetablePage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) {
+        final displayName = widget.isEnglish && course.name == '软件工程课'
+            ? 'Software Engineering'
+            : course.name;
+        final displayTeacher = widget.isEnglish && course.teacher == '教授'
+            ? 'Professor'
+            : course.teacher;
+        final displayLocation =
+            widget.isEnglish && course.location == '教学楼 A302'
+            ? 'Building A302'
+            : course.location;
+        final displayRemark = widget.isEnglish && course.remark == '记得带电脑'
+            ? 'Remember to bring laptop'
+            : course.remark;
+
         return Padding(
           padding: const EdgeInsets.all(24.0),
           child: Column(
@@ -177,11 +191,11 @@ class _TimetablePageState extends State<TimetablePage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween, // 已修正
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Expanded(
                     child: Text(
-                      course.name,
+                      displayName,
                       style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.bold,
@@ -203,7 +217,7 @@ class _TimetablePageState extends State<TimetablePage> {
                 ),
                 title: Text(widget.isEnglish ? 'Time & Date' : '上课时间'),
                 subtitle: Text(
-                  '${_getWeekdayLabel(course.weekday, widget.isEnglish)} ${course.startTime} - ${course.endTime} (第${course.startWeek}-${course.endWeek}周)',
+                  '${_getWeekdayLabel(course.weekday, widget.isEnglish)} ${course.startTime} - ${course.endTime} (${widget.isEnglish ? 'Weeks ' : '第'}${course.startWeek}-${course.endWeek}${widget.isEnglish ? '' : '周'})',
                 ),
               ),
               ListTile(
@@ -211,10 +225,10 @@ class _TimetablePageState extends State<TimetablePage> {
                 title: Text(
                   widget.isEnglish ? 'Location (Google Map)' : '上课教室 (点击跳转地图)',
                 ),
-                subtitle: Text(course.location),
+                subtitle: Text(displayLocation),
                 trailing: const Icon(Icons.open_in_new, size: 18),
                 onTap: () async {
-                  final query = Uri.encodeComponent(course.location);
+                  final query = Uri.encodeComponent(displayLocation);
                   final url = Uri.parse(
                     'https://www.google.com/maps/search/?api=1&query=$query',
                   );
@@ -226,18 +240,18 @@ class _TimetablePageState extends State<TimetablePage> {
               ListTile(
                 leading: const Icon(Icons.person, color: Colors.green),
                 title: Text(widget.isEnglish ? 'Teacher' : '任课老师'),
-                subtitle: Text(course.teacher),
+                subtitle: Text(displayTeacher),
               ),
               ListTile(
                 leading: const Icon(Icons.star, color: Colors.orange),
                 title: Text(widget.isEnglish ? 'Credits' : '学分'),
                 subtitle: Text('${course.credits} Cr'),
               ),
-              if (course.remark.isNotEmpty)
+              if (displayRemark.isNotEmpty)
                 ListTile(
                   leading: const Icon(Icons.note, color: Colors.purple),
                   title: Text(widget.isEnglish ? 'Remark' : '备注'),
-                  subtitle: Text(course.remark),
+                  subtitle: Text(displayRemark),
                 ),
               const SizedBox(height: 20),
             ],
@@ -296,6 +310,10 @@ class _TimetablePageState extends State<TimetablePage> {
                     widget.isEnglish && course.teacher == '教授'
                     ? 'Professor'
                     : course.teacher;
+                final displayLocation =
+                    widget.isEnglish && course.location == '教学楼 A302'
+                    ? 'Building A302'
+                    : course.location;
 
                 return InkWell(
                   onTap: () => _showCourseDetail(course),
@@ -326,8 +344,8 @@ class _TimetablePageState extends State<TimetablePage> {
                       ),
                       subtitle: Text(
                         widget.isEnglish
-                            ? 'Time: ${course.startTime} - ${course.endTime}\nLocation: ${course.location} | Teacher: $displayTeacher'
-                            : '时间: ${course.startTime} - ${course.endTime}\n地点: ${course.location} | 老师: $displayTeacher',
+                            ? 'Time: ${course.startTime} - ${course.endTime}\nLocation: $displayLocation | Teacher: $displayTeacher'
+                            : '时间: ${course.startTime} - ${course.endTime}\n地点: $displayLocation | 老师: $displayTeacher',
                       ),
                       isThreeLine: true,
                       trailing: Text('${course.credits} Cr'),
@@ -340,7 +358,7 @@ class _TimetablePageState extends State<TimetablePage> {
   }
 }
 
-/// 高颜值、人性化的“添加课程”表单页
+/// 具备完整交互功能的“添加课程”表单页
 class AddCoursePage extends StatefulWidget {
   final bool isEnglish;
   const AddCoursePage({super.key, required this.isEnglish});
@@ -357,10 +375,289 @@ class _AddCoursePageState extends State<AddCoursePage> {
 
   int _weekday = 1;
   double _credits = 3.0;
-  final int _startWeek = 1;
-  final int _endWeek = 16;
-  final String _startTime = "08:00";
-  final String _endTime = "09:40";
+  int _startWeek = 1;
+  int _endWeek = 16;
+  String _startTime = "08:00";
+  String _endTime = "09:40";
+  String _selectedColor = "#3F51B5";
+
+  final List<String> _colors = [
+    "#3F51B5",
+    "#E91E63",
+    "#4CAF50",
+    "#FF9800",
+    "#9C27B0",
+    "#00BCD4",
+  ];
+
+  Color _parseColor(String hexStr) {
+    try {
+      return Color(int.parse(hexStr.replaceFirst('#', '0xFF')));
+    } catch (_) {
+      return Colors.blueAccent;
+    }
+  }
+
+  void _showCreditsDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        double tempCredits = _credits;
+        return AlertDialog(
+          title: Text(widget.isEnglish ? 'Select Credits' : '选择学分'),
+          content: StatefulBuilder(
+            builder: (context, setStateSB) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '$tempCredits Cr',
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Slider(
+                    value: tempCredits,
+                    min: 0.5,
+                    max: 6.0,
+                    divisions: 11,
+                    onChanged: (val) => setStateSB(() => tempCredits = val),
+                  ),
+                ],
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(widget.isEnglish ? 'Cancel' : '取消'),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() => _credits = tempCredits);
+                Navigator.pop(context);
+              },
+              child: Text(widget.isEnglish ? 'Confirm' : '确定'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showWeeksDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        int tempStart = _startWeek;
+        int tempEnd = _endWeek;
+        return AlertDialog(
+          title: Text(widget.isEnglish ? 'Select Weeks' : '选择周数范围'),
+          content: StatefulBuilder(
+            builder: (context, setStateSB) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '第 $tempStart - $tempEnd 周',
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(widget.isEnglish ? 'Start: ' : '起始: '),
+                      Expanded(
+                        child: Slider(
+                          value: tempStart.toDouble(),
+                          min: 1,
+                          max: 20,
+                          divisions: 19,
+                          onChanged: (val) {
+                            setStateSB(() {
+                              tempStart = val.toInt();
+                              if (tempStart > tempEnd) tempEnd = tempStart;
+                            });
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Text(widget.isEnglish ? 'End:   ' : '结束: '),
+                      Expanded(
+                        child: Slider(
+                          value: tempEnd.toDouble(),
+                          min: 1,
+                          max: 20,
+                          divisions: 19,
+                          onChanged: (val) {
+                            setStateSB(() {
+                              tempEnd = val.toInt();
+                              if (tempEnd < tempStart) tempStart = tempEnd;
+                            });
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(widget.isEnglish ? 'Cancel' : '取消'),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _startWeek = tempStart;
+                  _endWeek = tempEnd;
+                });
+                Navigator.pop(context);
+              },
+              child: Text(widget.isEnglish ? 'Confirm' : '确定'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showTimeWeekdayDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        int tempWeekday = _weekday;
+        String tempStart = _startTime;
+        String tempEnd = _endTime;
+        return AlertDialog(
+          title: Text(widget.isEnglish ? 'Weekday & Time' : '星期与时间'),
+          content: StatefulBuilder(
+            builder: (context, setStateSB) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButton<int>(
+                    value: tempWeekday,
+                    isExpanded: true,
+                    items: List.generate(7, (i) {
+                      int day = i + 1;
+                      const zh = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+                      const en = [
+                        '',
+                        'Monday',
+                        'Tuesday',
+                        'Wednesday',
+                        'Thursday',
+                        'Friday',
+                        'Saturday',
+                        'Sunday',
+                      ];
+                      return DropdownMenuItem(
+                        value: day,
+                        child: Text(widget.isEnglish ? en[day] : zh[day]),
+                      );
+                    }),
+                    onChanged: (val) =>
+                        setStateSB(() => tempWeekday = val ?? 1),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          decoration: InputDecoration(
+                            labelText: widget.isEnglish ? 'Start Time' : '开始时间',
+                          ),
+                          controller: TextEditingController(text: tempStart),
+                          onChanged: (val) => tempStart = val,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          decoration: InputDecoration(
+                            labelText: widget.isEnglish ? 'End Time' : '结束时间',
+                          ),
+                          controller: TextEditingController(text: tempEnd),
+                          onChanged: (val) => tempEnd = val,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(widget.isEnglish ? 'Cancel' : '取消'),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _weekday = tempWeekday;
+                  _startTime = tempStart;
+                  _endTime = tempEnd;
+                });
+                Navigator.pop(context);
+              },
+              child: Text(widget.isEnglish ? 'Confirm' : '确定'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showColorPicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(20),
+          height: 200,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                widget.isEnglish ? 'Select Color Theme' : '选择课程主题色',
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: _colors.map((hex) {
+                  Color color = _parseColor(hex);
+                  return GestureDetector(
+                    onTap: () {
+                      setState(() => _selectedColor = hex);
+                      Navigator.pop(context);
+                    },
+                    child: CircleAvatar(
+                      backgroundColor: color,
+                      radius: 24,
+                      child: _selectedColor == hex
+                          ? const Icon(Icons.check, color: Colors.white)
+                          : null,
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
 
   void _saveCourse() {
     final name = _nameController.text.trim();
@@ -378,7 +675,7 @@ class _AddCoursePageState extends State<AddCoursePage> {
     final newCourse = Course(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       name: name,
-      color: "#3F51B5",
+      color: _selectedColor,
       credits: _credits,
       startWeek: _startWeek,
       endWeek: _endWeek,
@@ -405,6 +702,12 @@ class _AddCoursePageState extends State<AddCoursePage> {
 
   @override
   Widget build(BuildContext context) {
+    const zh = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    const en = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final dayLabel = widget.isEnglish ? en[_weekday] : zh[_weekday];
+
+    Color cardColor = _parseColor(_selectedColor);
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.isEnglish ? 'Add Course' : '添加课程'),
@@ -452,11 +755,12 @@ class _AddCoursePageState extends State<AddCoursePage> {
                   trailing: Container(
                     width: 24,
                     height: 24,
-                    decoration: const BoxDecoration(
-                      color: Colors.blueAccent,
+                    decoration: BoxDecoration(
+                      color: cardColor,
                       shape: BoxShape.circle,
                     ),
                   ),
+                  onTap: _showColorPicker,
                 ),
                 const Divider(height: 1),
                 ListTile(
@@ -466,6 +770,7 @@ class _AddCoursePageState extends State<AddCoursePage> {
                     '$_credits Cr',
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
+                  onTap: _showCreditsDialog,
                 ),
               ],
             ),
@@ -482,13 +787,17 @@ class _AddCoursePageState extends State<AddCoursePage> {
                 ListTile(
                   leading: const Icon(Icons.date_range, color: Colors.green),
                   title: Text(widget.isEnglish ? 'Weeks' : '周数'),
-                  trailing: Text('第 $_startWeek - $_endWeek 周 >'),
+                  trailing: Text(
+                    '${widget.isEnglish ? 'Weeks ' : '第'} $_startWeek - $_endWeek ${widget.isEnglish ? '' : '周'} >',
+                  ),
+                  onTap: _showWeeksDialog,
                 ),
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Icons.access_time, color: Colors.purple),
                   title: Text(widget.isEnglish ? 'Time & Weekday' : '节数与星期'),
-                  trailing: Text('周$_weekday ($_startTime - $_endTime) >'),
+                  trailing: Text('$dayLabel ($_startTime - $_endTime) >'),
+                  onTap: _showTimeWeekdayDialog,
                 ),
               ],
             ),
