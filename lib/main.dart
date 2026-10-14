@@ -358,7 +358,7 @@ class _TimetablePageState extends State<TimetablePage> {
   }
 }
 
-/// 具备完整交互功能的“添加课程”表单页
+/// 具备完整交互功能并完美适配深色/浅色模式的“添加课程”表单页
 class AddCoursePage extends StatefulWidget {
   final bool isEnglish;
   const AddCoursePage({super.key, required this.isEnglish});
@@ -708,6 +708,12 @@ class _AddCoursePageState extends State<AddCoursePage> {
 
     Color cardColor = _parseColor(_selectedColor);
 
+    // 根据当前主题亮度（深色/浅色）动态设定卡片背景色，防止深色模式下刺眼
+    final isDarkMode = Theme.of(context).brightness == Brightness.dark;
+    final dynamicCardBg = isDarkMode
+        ? Colors.grey.shade900
+        : Colors.grey.shade100;
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.isEnglish ? 'Add Course' : '添加课程'),
@@ -740,7 +746,7 @@ class _AddCoursePageState extends State<AddCoursePage> {
           const SizedBox(height: 16),
           Card(
             elevation: 0,
-            color: Colors.grey.shade100,
+            color: dynamicCardBg, // 动态适配深色模式背景
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
@@ -778,7 +784,7 @@ class _AddCoursePageState extends State<AddCoursePage> {
           const SizedBox(height: 16),
           Card(
             elevation: 0,
-            color: Colors.grey.shade100,
+            color: dynamicCardBg, // 动态适配深色模式背景
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
@@ -805,7 +811,7 @@ class _AddCoursePageState extends State<AddCoursePage> {
           const SizedBox(height: 16),
           Card(
             elevation: 0,
-            color: Colors.grey.shade100,
+            color: dynamicCardBg, // 动态适配深色模式背景
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
