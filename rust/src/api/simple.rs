@@ -40,8 +40,27 @@ pub fn check_conflict() -> bool {
     false
 }
 
-/// 获取某一週的课程列表
+/// 获取某一週的课程列表（我们在这里加一门测试课程，让界面能显示出来）
 #[flutter_rust_bridge::frb(sync)]
-pub fn get_courses_for_week(week: u32) -> Vec<Course> {
-    Vec::new()
+pub fn get_courses_for_week(_week: u32) -> Vec<Course> {
+    // 暂时先返回一个写死的测试课程，验证前后端数据传输
+    vec![Course {
+        id: "1".to_string(),
+        name: "软件工程课".to_string(),
+        color: "#4CAF50".to_string(),
+        credits: 3.0,
+        start_week: 1,
+        end_week: 16,
+        weekday: 1, // 周一
+        total_sections: 2,
+        has_break: true,
+        start_time: "08:00".to_string(),
+        end_time: "09:40".to_string(),
+        location: "教学楼 A302".to_string(),
+        teacher: "老师".to_string(),
+        remark: "记得带电脑".to_string(),
+        enable_reminder: true,
+        reminder_minutes: 15,
+        reminder_count: 1,
+    }]
 }
