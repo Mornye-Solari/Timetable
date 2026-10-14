@@ -4,7 +4,73 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-String greet({required String name}) =>
-    RustLib.instance.api.crateApiSimpleGreet(name: name);
+// These functions are ignored because they are not marked as `pub`: `get_mock_courses`, `is_active_in_week`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
+
+/// 获取指定周次的全部有效课程（按星期和节次排序）
+List<CourseSlot> getCoursesForWeek({required int week}) =>
+    RustLib.instance.api.crateApiSimpleGetCoursesForWeek(week: week);
+
+/// 检测新课程与现有课程是否存在时间冲突（位掩码 + 区间重叠判定）
+String? checkConflict({
+  required int dayOfWeek,
+  required int startPeriod,
+  required int endPeriod,
+  required int weekMask,
+}) => RustLib.instance.api.crateApiSimpleCheckConflict(
+  dayOfWeek: dayOfWeek,
+  startPeriod: startPeriod,
+  endPeriod: endPeriod,
+  weekMask: weekMask,
+);
+
+/// 单节课程紧凑内存结构
+class CourseSlot {
+  final int id;
+  final String name;
+  final String location;
+  final String teacher;
+  final int dayOfWeek;
+  final int startPeriod;
+  final int endPeriod;
+  final int weekMask;
+
+  const CourseSlot({
+    required this.id,
+    required this.name,
+    required this.location,
+    required this.teacher,
+    required this.dayOfWeek,
+    required this.startPeriod,
+    required this.endPeriod,
+    required this.weekMask,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      location.hashCode ^
+      teacher.hashCode ^
+      dayOfWeek.hashCode ^
+      startPeriod.hashCode ^
+      endPeriod.hashCode ^
+      weekMask.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CourseSlot &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          location == other.location &&
+          teacher == other.teacher &&
+          dayOfWeek == other.dayOfWeek &&
+          startPeriod == other.startPeriod &&
+          endPeriod == other.endPeriod &&
+          weekMask == other.weekMask;
+}
