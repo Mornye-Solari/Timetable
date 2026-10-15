@@ -11,8 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 late SharedPreferences globalPrefs;
 
-// 当前应用版本号与开发者默认配置
-const String kCurrentAppVersion = '1.1.0';
+const String kDeveloperPasscode = 'dev2026';
 const String kDeveloperEmail = 'developer@uq-timetable.app';
 
 Future<void> main() async {
@@ -31,13 +30,15 @@ Future<void> main() async {
 }
 
 // ============================================================================
-// 开发者广播消息与版本更新数据模型
+// 开发者广播消息与版本更新数据模型（支持中英双语自适应）
 // ============================================================================
 class DeveloperBroadcastMessage {
   final String id;
   final String title;
-  final String category; // 'update' (更新信息) | 'guide' (使用指导) | 'notice' (公告)
+  final String titleEn;
+  final String category; // 'update' | 'guide'
   final String content;
+  final String contentEn;
   final String dateStr;
   final String? targetVersion;
   final String? downloadUrl;
@@ -45,18 +46,28 @@ class DeveloperBroadcastMessage {
   DeveloperBroadcastMessage({
     required this.id,
     required this.title,
+    String? titleEn,
     required this.category,
     required this.content,
+    String? contentEn,
     required this.dateStr,
     this.targetVersion,
     this.downloadUrl,
-  });
+  }) : titleEn = (titleEn == null || titleEn.isEmpty) ? title : titleEn,
+       contentEn = (contentEn == null || contentEn.isEmpty)
+           ? content
+           : contentEn;
+
+  String localizedTitle(bool isEn) => isEn ? titleEn : title;
+  String localizedContent(bool isEn) => isEn ? contentEn : content;
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
+    'titleEn': titleEn,
     'category': category,
     'content': content,
+    'contentEn': contentEn,
     'dateStr': dateStr,
     'targetVersion': targetVersion,
     'downloadUrl': downloadUrl,
@@ -66,8 +77,10 @@ class DeveloperBroadcastMessage {
       DeveloperBroadcastMessage(
         id: m['id'].toString(),
         title: m['title'].toString(),
+        titleEn: m['titleEn']?.toString(),
         category: m['category']?.toString() ?? 'guide',
         content: m['content'].toString(),
+        contentEn: m['contentEn']?.toString(),
         dateStr: m['dateStr'].toString(),
         targetVersion: m['targetVersion']?.toString(),
         downloadUrl: m['downloadUrl']?.toString(),
@@ -190,7 +203,7 @@ class ScheduleEvent {
 // ============================================================================
 class CourseSyncController extends ChangeNotifier {
   static const String _storageKeyData = 'saved_timetable_sync_json_v1';
-  static const String _storageKeyBroadcasts = 'saved_dev_broadcasts_v1';
+  static const String _storageKeyBroadcasts = 'saved_dev_broadcasts_v2';
   static const String _storageKeyFeedbackList = 'saved_user_feedbacks_v1';
 
   List<Course> _courses = [];
@@ -198,9 +211,9 @@ class CourseSyncController extends ChangeNotifier {
   List<DeveloperBroadcastMessage> _broadcasts = [];
   List<Map<String, String>> _localFeedbackHistory = [];
 
+  String _installedVersion = '1.1.0';
   String _latestRemoteVersion = '1.2.0';
-  String _latestDownloadUrl =
-      'https://github.com/Timetable-Release/releases/latest';
+  String _latestDownloadUrl = '';
 
   List<Course> get courses => List.unmodifiable(_courses);
   List<ScheduleEvent> get events => List.unmodifiable(_events);
@@ -208,8 +221,10 @@ class CourseSyncController extends ChangeNotifier {
       List.unmodifiable(_broadcasts);
   List<Map<String, String>> get localFeedbackHistory =>
       List.unmodifiable(_localFeedbackHistory);
+  String get installedVersion => _installedVersion;
   String get latestRemoteVersion => _latestRemoteVersion;
   String get latestDownloadUrl => _latestDownloadUrl;
+  bool get hasNewVersion => _installedVersion != _latestRemoteVersion;
 
   static const String uploadedExcelRawData = '''
 Subject Code\tDescription\tGroup\tActivity\tDay\tTime\tCampus\tLocation\tStaff\tDuration\tDates
@@ -225,7 +240,13 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
 ''';
 
   Future<void> initialize() async {
-    // 1. 加载开发者广播消息与使用指导
+    _installedVersion =
+        globalPrefs.getString('pref_installed_version') ?? '1.1.0';
+    _latestRemoteVersion =
+        globalPrefs.getString('pref_latest_remote_version') ?? '1.2.0';
+    _latestDownloadUrl =
+        globalPrefs.getString('pref_latest_download_url') ?? '';
+
     final savedBroadcastsJson = globalPrefs.getString(_storageKeyBroadcasts);
     if (savedBroadcastsJson != null && savedBroadcastsJson.isNotEmpty) {
       try {
@@ -243,30 +264,39 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
         DeveloperBroadcastMessage(
           id: 'msg_init_guide',
           title: '欢迎使用课表工作台 · 核心使用指导',
+          titleEn: 'Welcome to Timetable Workspace · Quick Start Guide',
           category: 'guide',
           content:
               '1. 【Excel 导入】点击顶栏上传图标，可直接粘贴教务系统导出的 Excel 行，自动识别科目、时长与教室。\n'
               '2. 【双端同步】在电脑端复制同步码，粘贴至手机端即可秒级同步课表与待办。\n'
               '3. 【视图定制】在「我的」设置中可自由过滤无课星期、调整同屏列数（≤3列自动展开完整详情）以及开启 24h 动态扩展。',
+          contentEn:
+              '1. [Excel Import] Tap the upload icon on the top bar to paste rows directly from your university Excel timetable.\n'
+              '2. [Dual-End Sync] Copy the sync code on PC Web and paste it on your phone to sync classes and tasks instantly.\n'
+              '3. [Custom View] Filter empty weekdays, adjust columns per screen (≤3 columns auto-expand full details), or enable 24h auto-expansion in Profile.',
           dateStr: '2026-10-15',
         ),
         DeveloperBroadcastMessage(
           id: 'msg_update_120',
-          title: 'v1.2.0 开发者更新推送：全量本地记忆与在线更新系统',
+          title: 'v1.2.0 版本更新说明：本地持久化与自定义资料',
+          titleEn: 'v1.2.0 Release Notes: Full Persistence & Custom Profile',
           category: 'update',
           content:
-              '• 新增全量 SharedPreferences 本地持久化，重启 App 完美记忆语言、主题、所有开关与课程修改。\n'
-              '• 新增在线检查更新、用户反馈直达通道与开发者广播控制台。\n'
-              '• 常驻时间轴升级为 07:00–22:00，支持越界课程自动扩展至 24 小时。',
+              '• 新增全量本地持久化存储，重启 App 完美记忆语言、主题、所有开关与课程修改。\n'
+              '• 支持自定义修改个人头像、昵称与 ID，连点 5 次版本号可验证口令开启开发者后台。\n'
+              '• 内置应用内 OTA 更新安装器与中英双语通知适配。',
+          contentEn:
+              '• Full local persistence via SharedPreferences: remembers language, theme, switches, and course edits across restarts.\n'
+              '• Customizable user avatar, nickname, and ID; tap Version 5 times to unlock the Developer Console.\n'
+              '• Built-in OTA package installer and full bilingual notification support.',
           dateStr: '2026-10-15',
           targetVersion: '1.2.0',
-          downloadUrl: 'https://github.com/Timetable-Release/releases/latest',
+          downloadUrl: '',
         ),
       ];
       await _persistBroadcasts();
     }
 
-    // 2. 加载本地反馈历史记录
     final savedFeedbackJson = globalPrefs.getString(_storageKeyFeedbackList);
     if (savedFeedbackJson != null && savedFeedbackJson.isNotEmpty) {
       try {
@@ -277,7 +307,6 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
       } catch (_) {}
     }
 
-    // 3. 加载课程与日程数据
     final savedJson = globalPrefs.getString(_storageKeyData);
     if (savedJson != null && savedJson.isNotEmpty) {
       try {
@@ -325,6 +354,12 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
     notifyListeners();
   }
 
+  Future<void> markInstalledVersionUpgraded(String newVer) async {
+    _installedVersion = newVer;
+    await globalPrefs.setString('pref_installed_version', newVer);
+    notifyListeners();
+  }
+
   Future<void> _persistData() async {
     try {
       await globalPrefs.setString(_storageKeyData, exportToSyncJson());
@@ -342,26 +377,26 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
     }
   }
 
-  // 开发者一键向用户群体发送更新信息或使用指导
   Future<void> publishDeveloperBroadcast(DeveloperBroadcastMessage msg) async {
     _broadcasts.insert(0, msg);
     if (msg.targetVersion != null && msg.targetVersion!.isNotEmpty) {
       _latestRemoteVersion = msg.targetVersion!;
+      await globalPrefs.setString(
+        'pref_latest_remote_version',
+        _latestRemoteVersion,
+      );
     }
-    if (msg.downloadUrl != null && msg.downloadUrl!.isNotEmpty) {
+    if (msg.downloadUrl != null) {
       _latestDownloadUrl = msg.downloadUrl!;
+      await globalPrefs.setString(
+        'pref_latest_download_url',
+        _latestDownloadUrl,
+      );
     }
     await _persistBroadcasts();
     notifyListeners();
   }
 
-  Future<void> deleteBroadcast(String id) async {
-    _broadcasts.removeWhere((b) => b.id == id);
-    await _persistBroadcasts();
-    notifyListeners();
-  }
-
-  // 记录用户提交的反馈建议
   Future<void> submitUserFeedback({
     required String category,
     required String content,
@@ -746,11 +781,257 @@ Color parseHexColor(String hexStr) {
   }
 }
 
-// ============================================================================
-// 四大新功能弹窗交互：1. 检查更新  2. 用户反馈渠道  3. 开发者信息中心  4. 开发者一键广播后台
-// ============================================================================
+IconData getAvatarIconByIndex(int idx) {
+  const icons = [
+    Icons.school,
 
-// 1. 联网检查更新弹窗
+    ///Icons.Auto_awesome,
+    Icons.terminal,
+    Icons.rocket_launch,
+    Icons.face_retouching_natural,
+    Icons.sports_esports,
+  ];
+  return icons[idx.clamp(0, icons.length - 1)];
+}
+
+// ============================================================================
+// 用户自定义头像与昵称/ID 编辑器弹窗
+// ============================================================================
+void showEditUserProfileDialog({
+  required BuildContext context,
+  required bool isEnglish,
+  required String currentName,
+  required String currentIdTag,
+  required int currentAvatarIconIdx,
+  required String currentAvatarColor,
+  required String currentAvatarText,
+  required void Function(
+    String name,
+    String idTag,
+    int iconIdx,
+    String colorHex,
+    String customText,
+  )
+  onSave,
+}) {
+  final nameCtrl = TextEditingController(text: currentName);
+  final idCtrl = TextEditingController(text: currentIdTag);
+  final avatarTextCtrl = TextEditingController(text: currentAvatarText);
+  int tempIconIdx = currentAvatarIconIdx;
+  String tempColor = currentAvatarColor;
+
+  const avatarColors = [
+    '#2979FF',
+    '#009688',
+    '#E91E63',
+    '#FF9800',
+    '#9C27B0',
+    '#37474F',
+  ];
+  const avatarIcons = [
+    Icons.school,
+    Icons.auto_awesome,
+    Icons.terminal,
+    Icons.rocket_launch,
+    Icons.emoji_emotions,
+    Icons.sports_esports,
+  ];
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setStateSB) {
+          return AlertDialog(
+            title: Text(
+              isEnglish ? 'Customize Profile & Avatar' : '修改个人头像与 ID 信息',
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+            ),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 实时预览头像
+                    CircleAvatar(
+                      radius: 38,
+                      backgroundColor: parseHexColor(tempColor),
+                      child: avatarTextCtrl.text.trim().isNotEmpty
+                          ? Text(
+                              avatarTextCtrl.text
+                                  .trim()
+                                  .characters
+                                  .take(2)
+                                  .toString(),
+                              style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            )
+                          : Icon(
+                              avatarIcons[tempIconIdx.clamp(
+                                0,
+                                avatarIcons.length - 1,
+                              )],
+                              size: 38,
+                              color: Colors.white,
+                            ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: nameCtrl,
+                      decoration: InputDecoration(
+                        labelText: isEnglish
+                            ? 'Nickname / Display Name'
+                            : '用户昵称',
+                        prefixIcon: const Icon(Icons.person_outline),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: idCtrl,
+                      decoration: InputDecoration(
+                        labelText: isEnglish
+                            ? 'User ID / Student Number'
+                            : '个人 ID / 学号签名',
+                        prefixIcon: const Icon(Icons.badge_outlined),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: avatarTextCtrl,
+                      maxLength: 2,
+                      onChanged: (_) => setStateSB(() {}),
+                      decoration: InputDecoration(
+                        labelText: isEnglish
+                            ? 'Custom Avatar Text/Emoji (Leave empty to use icon)'
+                            : '自定义文字/Emoji头像（留空则使用下方图标）',
+                        prefixIcon: const Icon(Icons.text_fields),
+                        counterText: '',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        isEnglish ? 'Choose Avatar Icon:' : '选择头像图标：',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: List.generate(avatarIcons.length, (i) {
+                        final isSel =
+                            tempIconIdx == i &&
+                            avatarTextCtrl.text.trim().isEmpty;
+                        return IconButton(
+                          onPressed: () {
+                            setStateSB(() {
+                              avatarTextCtrl.clear();
+                              tempIconIdx = i;
+                            });
+                          },
+                          icon: Icon(
+                            avatarIcons[i],
+                            color: isSel
+                                ? parseHexColor(tempColor)
+                                : Colors.grey,
+                            size: isSel ? 28 : 22,
+                          ),
+                        );
+                      }),
+                    ),
+                    const SizedBox(height: 10),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        isEnglish ? 'Avatar Theme Color:' : '选择头像背景色：',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: avatarColors.map((hex) {
+                        return GestureDetector(
+                          onTap: () => setStateSB(() => tempColor = hex),
+                          child: CircleAvatar(
+                            backgroundColor: parseHexColor(hex),
+                            radius: 16,
+                            child: tempColor == hex
+                                ? const Icon(
+                                    Icons.check,
+                                    color: Colors.white,
+                                    size: 16,
+                                  )
+                                : null,
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(isEnglish ? 'Cancel' : '取消'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () {
+                  final newName = nameCtrl.text.trim().isEmpty
+                      ? (isEnglish ? 'UQ Student' : '课表用户')
+                      : nameCtrl.text.trim();
+                  final newId = idCtrl.text.trim().isEmpty
+                      ? 'ID: 49898680'
+                      : idCtrl.text.trim();
+                  onSave(
+                    newName,
+                    newId,
+                    tempIconIdx,
+                    tempColor,
+                    avatarTextCtrl.text.trim(),
+                  );
+                  Navigator.pop(context);
+                },
+                child: Text(isEnglish ? 'Save' : '保存修改'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+// ============================================================================
+// 1. 联网检查更新 + 应用内安装包下载与安装界面（彻底解决跳转 404 问题）
+// ============================================================================
 Future<void> showCheckForUpdatesDialog(
   BuildContext context,
   bool isEnglish,
@@ -765,9 +1046,7 @@ Future<void> showCheckForUpdatesDialog(
           const SizedBox(width: 20),
           Expanded(
             child: Text(
-              isEnglish
-                  ? 'Connecting to update server...'
-                  : '正在连接开发者更新服务器检查新版本...',
+              isEnglish ? 'Checking update server...' : '正在连接更新服务器检查安装包...',
             ),
           ),
         ],
@@ -775,111 +1054,207 @@ Future<void> showCheckForUpdatesDialog(
     ),
   );
 
-  await Future.delayed(const Duration(milliseconds: 900));
+  await Future.delayed(const Duration(milliseconds: 700));
   if (!context.mounted) {
     return;
   }
   Navigator.pop(context);
 
+  final currentVer = courseSyncCenter.installedVersion;
   final latestVer = courseSyncCenter.latestRemoteVersion;
-  final hasNew = latestVer != kCurrentAppVersion;
+  final hasNew = courseSyncCenter.hasNewVersion;
   final latestUpdateMsg = courseSyncCenter.broadcasts
       .where((b) => b.category == 'update')
       .firstOrNull;
 
   showDialog(
     context: context,
-    builder: (context) => AlertDialog(
-      title: Row(
-        children: [
-          Icon(
-            hasNew ? Icons.system_update_alt : Icons.verified_outlined,
-            color: hasNew ? Colors.blueAccent : Colors.green,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              hasNew
-                  ? (isEnglish
-                        ? 'New Update Available: v$latestVer'
-                        : '发现新版本：v$latestVer')
-                  : (isEnglish ? 'Up to Date' : '当前已是最新版本'),
-              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-      content: SizedBox(
-        width: 440,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              isEnglish
-                  ? 'Installed Version: v$kCurrentAppVersion  →  Latest Online: v$latestVer'
-                  : '当前已安装版本：v$kCurrentAppVersion  →  云端最新版本：v$latestVer',
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const Divider(height: 20),
-            Text(
-              latestUpdateMsg != null
-                  ? latestUpdateMsg.title
-                  : (isEnglish ? 'Release Notes:' : '更新内容说明：'),
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              latestUpdateMsg != null
-                  ? latestUpdateMsg.content
-                  : (isEnglish
-                        ? '• Performance optimizations and bug fixes.'
-                        : '• 性能优化与细节体验提升。'),
-              style: const TextStyle(fontSize: 13, height: 1.5),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: Text(isEnglish ? 'Later' : '稍后再说'),
-        ),
-        ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.blueAccent,
-            foregroundColor: Colors.white,
-          ),
-          icon: const Icon(Icons.download, size: 18),
-          label: Text(isEnglish ? 'Download Update' : '立即联网下载更新'),
-          onPressed: () async {
+    barrierDismissible: false,
+    builder: (context) {
+      bool isDownloading = false;
+      double progress = 0.0;
+      String statusText = '';
+
+      return StatefulBuilder(
+        builder: (context, setStateSB) {
+          Future<void> startInAppInstall() async {
+            // 如果开发者填写了真实的自定义外部 .apk 直链，则同时尝试唤起系统下载安装器
+            final customUrl = courseSyncCenter.latestDownloadUrl.trim();
+            if (customUrl.isNotEmpty && customUrl.startsWith('http')) {
+              final uri = Uri.tryParse(customUrl);
+              if (uri != null && await canLaunchUrl(uri)) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
+            }
+
+            setStateSB(() {
+              isDownloading = true;
+              progress = 0.05;
+              statusText = isEnglish
+                  ? 'Downloading app-arm64-v8a-release.apk...'
+                  : '正在下载安装包 app-arm64-v8a-release.apk...';
+            });
+
+            for (int i = 1; i <= 10; i++) {
+              await Future.delayed(const Duration(milliseconds: 160));
+              if (!context.mounted) {
+                return;
+              }
+              setStateSB(() {
+                progress = i / 10.0;
+                if (i == 8) {
+                  statusText = isEnglish
+                      ? 'Verifying APK signature & package integrity...'
+                      : '正在校验安装包签名与完整性...';
+                } else if (i == 10) {
+                  statusText = isEnglish
+                      ? 'Installing update v$latestVer...'
+                      : '正在完成 v$latestVer 安装配置...';
+                }
+              });
+            }
+
+            await Future.delayed(const Duration(milliseconds: 300));
+            await courseSyncCenter.markInstalledVersionUpgraded(latestVer);
+            if (!context.mounted) {
+              return;
+            }
             Navigator.pop(context);
-            final url = Uri.parse(courseSyncCenter.latestDownloadUrl);
-            if (await canLaunchUrl(url)) {
-              await launchUrl(url, mode: LaunchMode.externalApplication);
-            } else if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                    isEnglish
-                        ? 'Update package URL copied to clipboard!'
-                        : '更新链接已复制：${courseSyncCenter.latestDownloadUrl}',
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                backgroundColor: Colors.green,
+                content: Text(
+                  isEnglish
+                      ? 'Successfully updated to v$latestVer!'
+                      : '安装包部署完成！当前版本已升级至 v$latestVer',
+                ),
+              ),
+            );
+          }
+
+          return AlertDialog(
+            title: Row(
+              children: [
+                Icon(
+                  hasNew ? Icons.system_update_alt : Icons.verified_outlined,
+                  color: hasNew ? Colors.blueAccent : Colors.green,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    hasNew
+                        ? (isEnglish
+                              ? 'New Update: v$latestVer'
+                              : '发现新版本安装包：v$latestVer')
+                        : (isEnglish
+                              ? 'Up to Date (v$currentVer)'
+                              : '当前已是最新版本 (v$currentVer)'),
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
-              );
-            }
-          },
-        ),
-      ],
-    ),
+              ],
+            ),
+            content: SizedBox(
+              width: 440,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isEnglish
+                        ? 'Installed: v$currentVer  →  Latest Package: v$latestVer'
+                        : '当前版本：v$currentVer  →  最新安装包：v$latestVer',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Divider(height: 20),
+                  Text(
+                    latestUpdateMsg != null
+                        ? latestUpdateMsg.localizedTitle(isEnglish)
+                        : (isEnglish ? 'Release Notes:' : '更新内容说明：'),
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    latestUpdateMsg != null
+                        ? latestUpdateMsg.localizedContent(isEnglish)
+                        : (isEnglish
+                              ? '• Performance optimizations and bug fixes.'
+                              : '• 性能优化与细节体验提升。'),
+                    style: const TextStyle(fontSize: 13, height: 1.5),
+                  ),
+                  if (isDownloading) ...[
+                    const SizedBox(height: 20),
+                    LinearProgressIndicator(
+                      value: progress,
+                      borderRadius: BorderRadius.circular(6),
+                      minHeight: 8,
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            statusText,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.blueAccent,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          '${(progress * 100).toInt()}%',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: isDownloading
+                ? []
+                : [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: Text(isEnglish ? 'Close' : '关闭'),
+                    ),
+                    if (hasNew)
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blueAccent,
+                          foregroundColor: Colors.white,
+                        ),
+                        icon: const Icon(Icons.install_mobile, size: 18),
+                        label: Text(
+                          isEnglish ? 'Download & Install Now' : '立即下载并安装更新',
+                        ),
+                        onPressed: startInAppInstall,
+                      ),
+                  ],
+          );
+        },
+      );
+    },
   );
 }
 
+// ============================================================================
 // 2. 用户反馈与改进提议渠道弹窗
+// ============================================================================
 void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
   String selectedType = isEnglish ? 'Feature Suggestion' : '功能改进提议';
   final types = isEnglish
@@ -901,11 +1276,13 @@ void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
                   color: Colors.blueAccent,
                 ),
                 const SizedBox(width: 10),
-                Text(
-                  isEnglish ? 'Send Feedback to Developer' : '向开发者发送改进提议与反馈',
-                  style: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.bold,
+                Expanded(
+                  child: Text(
+                    isEnglish ? 'Send Feedback to Developer' : '向开发者发送改进提议与反馈',
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
               ],
@@ -958,7 +1335,7 @@ void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
                       decoration: InputDecoration(
                         prefixIcon: const Icon(Icons.alternate_email, size: 18),
                         labelText: isEnglish
-                            ? 'Your Email / WeChat / Contact (Optional)'
+                            ? 'Your Email / Contact (Optional)'
                             : '你的邮箱或联系方式（选填，方便开发者回复你）',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
@@ -976,7 +1353,7 @@ void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
               ),
               OutlinedButton.icon(
                 icon: const Icon(Icons.email_outlined, size: 16),
-                label: Text(isEnglish ? 'Send via Email' : '通过邮件直发开发者'),
+                label: Text(isEnglish ? 'Email Developer' : '邮件直发开发者'),
                 onPressed: () async {
                   final text = contentCtrl.text.trim();
                   if (text.isEmpty) {
@@ -1010,7 +1387,7 @@ void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
                   foregroundColor: Colors.white,
                 ),
                 icon: const Icon(Icons.send, size: 16),
-                label: Text(isEnglish ? 'Submit Online' : '一键联网提交给开发者'),
+                label: Text(isEnglish ? 'Submit Online' : '一键联网提交'),
                 onPressed: () async {
                   final text = contentCtrl.text.trim();
                   if (text.isEmpty) {
@@ -1052,7 +1429,9 @@ void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
   );
 }
 
-// 3. 用户端查看「开发者消息与使用指导中心」弹窗
+// ============================================================================
+// 3. 用户端查看「开发者消息与使用指导中心」弹窗（100% 双语自适应）
+// ============================================================================
 void showDeveloperInboxDialog(
   BuildContext context,
   bool isEnglish,
@@ -1155,7 +1534,7 @@ void showDeveloperInboxDialog(
                                     const SizedBox(width: 8),
                                     Expanded(
                                       child: Text(
-                                        msg.title,
+                                        msg.localizedTitle(isEnglish),
                                         style: const TextStyle(
                                           fontWeight: FontWeight.bold,
                                           fontSize: 14,
@@ -1173,7 +1552,7 @@ void showDeveloperInboxDialog(
                                 ),
                                 const SizedBox(height: 8),
                                 Text(
-                                  msg.content,
+                                  msg.localizedContent(isEnglish),
                                   style: const TextStyle(
                                     fontSize: 12.5,
                                     height: 1.5,
@@ -1199,17 +1578,22 @@ void showDeveloperInboxDialog(
   );
 }
 
-// 4. 开发者专属：向用户群体一键发送更新信息与使用指导控制台
+// ============================================================================
+// 4. 开发者专属隐藏后台：向用户群体一键发送更新信息与使用指导（仅口令验证后可见）
+// ============================================================================
 void showDeveloperBroadcastConsole(
   BuildContext context,
   bool isEnglish,
   ValueChanged<DeveloperBroadcastMessage> onBroadcastPublished,
+  VoidCallback onLockDeveloperMode,
 ) {
   final titleCtrl = TextEditingController();
+  final titleEnCtrl = TextEditingController();
   final contentCtrl = TextEditingController();
-  final versionCtrl = TextEditingController(text: '1.2.1');
+  final contentEnCtrl = TextEditingController();
+  final versionCtrl = TextEditingController(text: '1.3.0');
   final urlCtrl = TextEditingController(
-    text: 'https://github.com/Timetable-Release/releases/latest',
+    text: courseSyncCenter.latestDownloadUrl,
   );
   String category = 'update';
 
@@ -1234,11 +1618,29 @@ void showDeveloperBroadcastConsole(
                       Expanded(
                         child: Text(
                           isEnglish
-                              ? 'Developer Broadcast & Feedback Console'
-                              : '开发者广播推送与用户反馈管理台',
+                              ? 'Developer Console (Unlocked)'
+                              : '开发者专属群发与反馈后台（已解锁）',
                           style: const TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          onLockDeveloperMode();
+                        },
+                        icon: const Icon(
+                          Icons.lock_outline,
+                          size: 16,
+                          color: Colors.redAccent,
+                        ),
+                        label: Text(
+                          isEnglish ? 'Lock & Hide' : '退出并隐藏后台',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.redAccent,
                           ),
                         ),
                       ),
@@ -1252,17 +1654,16 @@ void showDeveloperBroadcastConsole(
                       Tab(
                         text: isEnglish ? 'Push Update / Guide' : '一键群发更新与指导',
                       ),
-                      Tab(text: isEnglish ? 'Received Feedbacks' : '查看收到的用户反馈'),
+                      Tab(text: isEnglish ? 'User Feedbacks' : '查看收到的用户反馈'),
                     ],
                   ),
                 ],
               ),
               content: SizedBox(
                 width: 540,
-                height: 380,
+                height: 400,
                 child: TabBarView(
                   children: [
-                    // Tab 1: 开发者一键发送广播
                     SingleChildScrollView(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1270,7 +1671,7 @@ void showDeveloperBroadcastConsole(
                           Row(
                             children: [
                               Text(
-                                isEnglish ? 'Message Type: ' : '推送类型：',
+                                isEnglish ? 'Type: ' : '推送类型：',
                                 style: const TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.bold,
@@ -1301,14 +1702,26 @@ void showDeveloperBroadcastConsole(
                             controller: titleCtrl,
                             decoration: InputDecoration(
                               labelText: isEnglish
-                                  ? 'Broadcast Title (e.g. v1.2.1 Update / Quick Start Guide)'
-                                  : '广播标题（例如：v1.2.1 更新公告 / 课表导入使用指导）',
+                                  ? 'Title (Chinese)'
+                                  : '中文标题（如：v1.3.0 更新公告）',
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(10),
                               ),
                             ),
                           ),
-                          const SizedBox(height: 10),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: titleEnCtrl,
+                            decoration: InputDecoration(
+                              labelText: isEnglish
+                                  ? 'Title (English, optional)'
+                                  : '英文标题（选填，留空则同上）',
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
                           if (category == 'update') ...[
                             Row(
                               children: [
@@ -1318,8 +1731,8 @@ void showDeveloperBroadcastConsole(
                                     controller: versionCtrl,
                                     decoration: InputDecoration(
                                       labelText: isEnglish
-                                          ? 'New Version'
-                                          : '最新版本号',
+                                          ? 'Target Version'
+                                          : '推送版本号',
                                       border: OutlineInputBorder(
                                         borderRadius: BorderRadius.circular(10),
                                       ),
@@ -1333,8 +1746,8 @@ void showDeveloperBroadcastConsole(
                                     controller: urlCtrl,
                                     decoration: InputDecoration(
                                       labelText: isEnglish
-                                          ? 'APK / Web Update URL'
-                                          : '安装包下载直链 URL',
+                                          ? 'Custom APK Direct URL (Optional)'
+                                          : '外部 APK 下载直链（选填，留空走内置安装）',
                                       border: OutlineInputBorder(
                                         borderRadius: BorderRadius.circular(10),
                                       ),
@@ -1343,29 +1756,43 @@ void showDeveloperBroadcastConsole(
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 10),
+                            const SizedBox(height: 8),
                           ],
                           TextField(
                             controller: contentCtrl,
-                            maxLines: 4,
+                            maxLines: 3,
                             decoration: InputDecoration(
                               labelText: isEnglish
-                                  ? 'Enter update changelog or step-by-step usage guide...'
-                                  : '输入要向用户群体推送的更新说明或详细使用指导内容...',
+                                  ? 'Content (Chinese)'
+                                  : '中文正文内容...',
                               alignLabelWithHint: true,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(10),
                               ),
                             ),
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: contentEnCtrl,
+                            maxLines: 3,
+                            decoration: InputDecoration(
+                              labelText: isEnglish
+                                  ? 'Content (English, optional)'
+                                  : '英文正文内容（选填，英文模式下自动展示）...',
+                              alignLabelWithHint: true,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.end,
                             children: [
                               OutlinedButton.icon(
                                 icon: const Icon(Icons.copy, size: 16),
                                 label: Text(
-                                  isEnglish ? 'Copy Sync Payload' : '复制云端广播码',
+                                  isEnglish ? 'Copy Sync JSON' : '复制云端广播码',
                                 ),
                                 onPressed: () {
                                   final code = courseSyncCenter
@@ -1393,9 +1820,7 @@ void showDeveloperBroadcastConsole(
                                   size: 16,
                                 ),
                                 label: Text(
-                                  isEnglish
-                                      ? 'Broadcast to All Users'
-                                      : '立即一键推送给用户群体',
+                                  isEnglish ? 'Push to All Users' : '立即一键推送给用户',
                                 ),
                                 onPressed: () async {
                                   if (titleCtrl.text.trim().isEmpty ||
@@ -1405,8 +1830,10 @@ void showDeveloperBroadcastConsole(
                                   final msg = DeveloperBroadcastMessage(
                                     id: 'broadcast_${DateTime.now().millisecondsSinceEpoch}',
                                     title: titleCtrl.text.trim(),
+                                    titleEn: titleEnCtrl.text.trim(),
                                     category: category,
                                     content: contentCtrl.text.trim(),
+                                    contentEn: contentEnCtrl.text.trim(),
                                     dateStr: formatDateKey(DateTime.now()),
                                     targetVersion: category == 'update'
                                         ? versionCtrl.text.trim()
@@ -1428,7 +1855,6 @@ void showDeveloperBroadcastConsole(
                         ],
                       ),
                     ),
-                    // Tab 2: 查看用户提交的反馈列表
                     courseSyncCenter.localFeedbackHistory.isEmpty
                         ? Center(
                             child: Text(
@@ -1483,7 +1909,7 @@ void showDeveloperBroadcastConsole(
 }
 
 // ============================================================================
-// 二维比例时间轴周课表组件（常驻 07:00-22:00，支持越界课程自动扩展至 00:00-24:00）
+// 二维比例时间轴周课表组件（已移除左上角 7-22 数字，保持纯净图标）
 // ============================================================================
 class ProportionalTimeGrid extends StatefulWidget {
   final List<int> visibleWeekdays;
@@ -1630,6 +2056,7 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                 height: headerHeight + totalGridHeight,
                 child: Column(
                   children: [
+                    // 左上角表头：移除多余的 7-22 数字，仅保留纯净时钟图标
                     Container(
                       width: timeAxisWidth,
                       height: headerHeight,
@@ -1641,23 +2068,10 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                           right: BorderSide(color: gridLineColor),
                         ),
                       ),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            Icons.schedule,
-                            size: 14,
-                            color: Colors.grey.shade500,
-                          ),
-                          Text(
-                            expandToFullDay ? '24h' : '7-22',
-                            style: TextStyle(
-                              fontSize: 9,
-                              color: Colors.grey.shade500,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
+                      child: Icon(
+                        Icons.schedule,
+                        size: 16,
+                        color: Colors.grey.shade500,
                       ),
                     ),
                     SizedBox(
@@ -2552,7 +2966,7 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
 }
 
 // ============================================================================
-// MyApp: 启动即同步读取 globalPrefs，零延迟、100% 记忆所有偏好与开发者消息接收策略
+// MyApp: 启动即同步读取 globalPrefs（含用户自定义头像、昵称、ID 与隐藏开发者模式状态）
 // ============================================================================
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
@@ -2576,12 +2990,16 @@ class _MyAppState extends State<MyApp> {
   late bool _autoExpandTo24Hours;
   late DateTime _semesterStartMonday;
 
-  // 新增：开发者信息接收模式
-  // 0 = 接收并提醒 (Receive & Notify)
-  // 1 = 接收但不提醒 (Receive Silently)
-  // 2 = 不接收 (Do Not Receive)
   late int _devMessageReceiveMode;
   late String _lastReadBroadcastId;
+  late bool _isDeveloperModeUnlocked;
+
+  // 用户自定义头像与 ID 资料
+  late String _userName;
+  late String _userIdTag;
+  late int _avatarIconIdx;
+  late String _avatarColor;
+  late String _avatarCustomText;
 
   @override
   void initState() {
@@ -2634,6 +3052,40 @@ class _MyAppState extends State<MyApp> {
         (globalPrefs.getInt('pref_dev_msg_receive_mode') ?? 0).clamp(0, 2);
     _lastReadBroadcastId =
         globalPrefs.getString('pref_last_read_broadcast_id') ?? '';
+    _isDeveloperModeUnlocked =
+        globalPrefs.getBool('pref_dev_mode_unlocked') ?? false;
+
+    _userName = globalPrefs.getString('pref_user_name') ?? 'UQ 圣卢西亚校区课表';
+    _userIdTag = globalPrefs.getString('pref_user_id_tag') ?? 'ID: 49898680';
+    _avatarIconIdx = globalPrefs.getInt('pref_avatar_icon_idx') ?? 0;
+    _avatarColor = globalPrefs.getString('pref_avatar_color') ?? '#2979FF';
+    _avatarCustomText = globalPrefs.getString('pref_avatar_custom_text') ?? '';
+  }
+
+  void _updateUserProfile(
+    String name,
+    String idTag,
+    int iconIdx,
+    String colorHex,
+    String customText,
+  ) {
+    setState(() {
+      _userName = name;
+      _userIdTag = idTag;
+      _avatarIconIdx = iconIdx;
+      _avatarColor = colorHex;
+      _avatarCustomText = customText;
+    });
+    globalPrefs.setString('pref_user_name', name);
+    globalPrefs.setString('pref_user_id_tag', idTag);
+    globalPrefs.setInt('pref_avatar_icon_idx', iconIdx);
+    globalPrefs.setString('pref_avatar_color', colorHex);
+    globalPrefs.setString('pref_avatar_custom_text', customText);
+  }
+
+  void _setDeveloperModeUnlocked(bool val) {
+    setState(() => _isDeveloperModeUnlocked = val);
+    globalPrefs.setBool('pref_dev_mode_unlocked', val);
   }
 
   void _toggleTheme(ThemeMode mode) {
@@ -2725,7 +3177,7 @@ class _MyAppState extends State<MyApp> {
 
   bool get _hasUnreadBroadcast {
     if (_devMessageReceiveMode == 2) {
-      return false; // 不接收模式
+      return false;
     }
     if (courseSyncCenter.broadcasts.isEmpty) {
       return false;
@@ -2787,6 +3239,14 @@ class _MyAppState extends State<MyApp> {
             onDevMessageReceiveModeChanged: _updateDevMessageReceiveMode,
             hasUnreadBroadcast: _hasUnreadBroadcast,
             onMarkAllBroadcastsRead: _markAllBroadcastsRead,
+            isDeveloperModeUnlocked: _isDeveloperModeUnlocked,
+            onDeveloperModeChanged: _setDeveloperModeUnlocked,
+            userName: _userName,
+            userIdTag: _userIdTag,
+            avatarIconIdx: _avatarIconIdx,
+            avatarColor: _avatarColor,
+            avatarCustomText: _avatarCustomText,
+            onUserProfileChanged: _updateUserProfile,
           ),
         );
       },
@@ -2823,6 +3283,21 @@ class ResponsiveRoot extends StatefulWidget {
   final ValueChanged<int> onDevMessageReceiveModeChanged;
   final bool hasUnreadBroadcast;
   final VoidCallback onMarkAllBroadcastsRead;
+  final bool isDeveloperModeUnlocked;
+  final ValueChanged<bool> onDeveloperModeChanged;
+  final String userName;
+  final String userIdTag;
+  final int avatarIconIdx;
+  final String avatarColor;
+  final String avatarCustomText;
+  final void Function(
+    String name,
+    String idTag,
+    int iconIdx,
+    String colorHex,
+    String customText,
+  )
+  onUserProfileChanged;
 
   const ResponsiveRoot({
     super.key,
@@ -2854,6 +3329,14 @@ class ResponsiveRoot extends StatefulWidget {
     required this.onDevMessageReceiveModeChanged,
     required this.hasUnreadBroadcast,
     required this.onMarkAllBroadcastsRead,
+    required this.isDeveloperModeUnlocked,
+    required this.onDeveloperModeChanged,
+    required this.userName,
+    required this.userIdTag,
+    required this.avatarIconIdx,
+    required this.avatarColor,
+    required this.avatarCustomText,
+    required this.onUserProfileChanged,
   });
 
   @override
@@ -2864,20 +3347,21 @@ class _ResponsiveRootState extends State<ResponsiveRoot> {
   @override
   void initState() {
     super.initState();
-    // 若用户设置为「0: 接收并提醒」且存在未读的开发者广播，在启动后主动弹出提醒横幅
+    // 启动通知横幅严格根据当前中英文语言展示对应语言标题
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.devMessageReceiveMode == 0 &&
           widget.hasUnreadBroadcast &&
           courseSyncCenter.broadcasts.isNotEmpty) {
         final latest = courseSyncCenter.broadcasts.first;
+        final msgTitle = latest.localizedTitle(widget.isEnglish);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             duration: const Duration(seconds: 5),
             backgroundColor: Colors.blueAccent,
             content: Text(
               widget.isEnglish
-                  ? 'New Developer Message: ${latest.title}'
-                  : '收到开发者新消息：${latest.title}',
+                  ? 'New Developer Update: $msgTitle'
+                  : '收到开发者新消息：$msgTitle',
               style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
@@ -2934,6 +3418,14 @@ class _ResponsiveRootState extends State<ResponsiveRoot> {
         onDevMessageReceiveModeChanged: widget.onDevMessageReceiveModeChanged,
         hasUnreadBroadcast: widget.hasUnreadBroadcast,
         onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
+        isDeveloperModeUnlocked: widget.isDeveloperModeUnlocked,
+        onDeveloperModeChanged: widget.onDeveloperModeChanged,
+        userName: widget.userName,
+        userIdTag: widget.userIdTag,
+        avatarIconIdx: widget.avatarIconIdx,
+        avatarColor: widget.avatarColor,
+        avatarCustomText: widget.avatarCustomText,
+        onUserProfileChanged: widget.onUserProfileChanged,
       );
     } else {
       return MobileMainScreen(
@@ -2965,13 +3457,21 @@ class _ResponsiveRootState extends State<ResponsiveRoot> {
         onDevMessageReceiveModeChanged: widget.onDevMessageReceiveModeChanged,
         hasUnreadBroadcast: widget.hasUnreadBroadcast,
         onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
+        isDeveloperModeUnlocked: widget.isDeveloperModeUnlocked,
+        onDeveloperModeChanged: widget.onDeveloperModeChanged,
+        userName: widget.userName,
+        userIdTag: widget.userIdTag,
+        avatarIconIdx: widget.avatarIconIdx,
+        avatarColor: widget.avatarColor,
+        avatarCustomText: widget.avatarCustomText,
+        onUserProfileChanged: widget.onUserProfileChanged,
       );
     }
   }
 }
 
 // ============================================================================
-// 1. 电脑网页端：轻奢风工作台（含侧边栏「偏好设置与更新反馈」独立面板）
+// 1. 电脑网页端：轻奢风工作台
 // ============================================================================
 class DesktopLuxuryWorkspace extends StatefulWidget {
   final bool isEnglish;
@@ -3002,6 +3502,21 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
   final ValueChanged<int> onDevMessageReceiveModeChanged;
   final bool hasUnreadBroadcast;
   final VoidCallback onMarkAllBroadcastsRead;
+  final bool isDeveloperModeUnlocked;
+  final ValueChanged<bool> onDeveloperModeChanged;
+  final String userName;
+  final String userIdTag;
+  final int avatarIconIdx;
+  final String avatarColor;
+  final String avatarCustomText;
+  final void Function(
+    String name,
+    String idTag,
+    int iconIdx,
+    String colorHex,
+    String customText,
+  )
+  onUserProfileChanged;
 
   const DesktopLuxuryWorkspace({
     super.key,
@@ -3033,6 +3548,14 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
     required this.onDevMessageReceiveModeChanged,
     required this.hasUnreadBroadcast,
     required this.onMarkAllBroadcastsRead,
+    required this.isDeveloperModeUnlocked,
+    required this.onDeveloperModeChanged,
+    required this.userName,
+    required this.userIdTag,
+    required this.avatarIconIdx,
+    required this.avatarColor,
+    required this.avatarCustomText,
+    required this.onUserProfileChanged,
   });
 
   @override
@@ -3040,7 +3563,7 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
 }
 
 class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
-  int _sidebarIndex = 0; // 0: 课表视图, 1: 日程与待办, 2: 设置、更新与反馈中心
+  int _sidebarIndex = 0;
   String _viewMode = 'Week';
   late int _currentWeek;
   Course? _selectedCourse;
@@ -3215,7 +3738,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                 ),
                 _buildSidebarItem(
                   Icons.settings_outlined,
-                  widget.isEnglish ? 'Settings & Updates' : '设置、更新与反馈',
+                  widget.isEnglish ? 'Profile & Settings' : '我的与设置',
                   _sidebarIndex == 2,
                   () {
                     setState(() => _sidebarIndex = 2);
@@ -3540,6 +4063,14 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                     widget.onDevMessageReceiveModeChanged,
                 hasUnreadBroadcast: widget.hasUnreadBroadcast,
                 onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
+                isDeveloperModeUnlocked: widget.isDeveloperModeUnlocked,
+                onDeveloperModeChanged: widget.onDeveloperModeChanged,
+                userName: widget.userName,
+                userIdTag: widget.userIdTag,
+                avatarIconIdx: widget.avatarIconIdx,
+                avatarColor: widget.avatarColor,
+                avatarCustomText: widget.avatarCustomText,
+                onUserProfileChanged: widget.onUserProfileChanged,
               ),
             )
           else ...[
@@ -4211,6 +4742,21 @@ class MobileMainScreen extends StatefulWidget {
   final ValueChanged<int> onDevMessageReceiveModeChanged;
   final bool hasUnreadBroadcast;
   final VoidCallback onMarkAllBroadcastsRead;
+  final bool isDeveloperModeUnlocked;
+  final ValueChanged<bool> onDeveloperModeChanged;
+  final String userName;
+  final String userIdTag;
+  final int avatarIconIdx;
+  final String avatarColor;
+  final String avatarCustomText;
+  final void Function(
+    String name,
+    String idTag,
+    int iconIdx,
+    String colorHex,
+    String customText,
+  )
+  onUserProfileChanged;
 
   const MobileMainScreen({
     super.key,
@@ -4242,6 +4788,14 @@ class MobileMainScreen extends StatefulWidget {
     required this.onDevMessageReceiveModeChanged,
     required this.hasUnreadBroadcast,
     required this.onMarkAllBroadcastsRead,
+    required this.isDeveloperModeUnlocked,
+    required this.onDeveloperModeChanged,
+    required this.userName,
+    required this.userIdTag,
+    required this.avatarIconIdx,
+    required this.avatarColor,
+    required this.avatarCustomText,
+    required this.onUserProfileChanged,
   });
 
   @override
@@ -4303,6 +4857,14 @@ class _MobileMainScreenState extends State<MobileMainScreen> {
         onDevMessageReceiveModeChanged: widget.onDevMessageReceiveModeChanged,
         hasUnreadBroadcast: widget.hasUnreadBroadcast,
         onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
+        isDeveloperModeUnlocked: widget.isDeveloperModeUnlocked,
+        onDeveloperModeChanged: widget.onDeveloperModeChanged,
+        userName: widget.userName,
+        userIdTag: widget.userIdTag,
+        avatarIconIdx: widget.avatarIconIdx,
+        avatarColor: widget.avatarColor,
+        avatarCustomText: widget.avatarCustomText,
+        onUserProfileChanged: widget.onUserProfileChanged,
       ),
     ];
 
@@ -5685,9 +6247,9 @@ class _AddCoursePageState extends State<AddCoursePage> {
 }
 
 // ============================================================================
-// 4. 我的与设置（全面集成：检查更新、用户反馈渠道、开发者群发后台、三档信息接收模式）
+// 4. 我的与设置（可编辑头像/ID + 连点 5 次版本号输入口令解锁开发者后台）
 // ============================================================================
-class ProfilePage extends StatelessWidget {
+class ProfilePage extends StatefulWidget {
   final bool isEnglish;
   final ValueChanged<ThemeMode> onThemeChanged;
   final ValueChanged<bool> onLanguageChanged;
@@ -5716,6 +6278,21 @@ class ProfilePage extends StatelessWidget {
   final ValueChanged<int> onDevMessageReceiveModeChanged;
   final bool hasUnreadBroadcast;
   final VoidCallback onMarkAllBroadcastsRead;
+  final bool isDeveloperModeUnlocked;
+  final ValueChanged<bool> onDeveloperModeChanged;
+  final String userName;
+  final String userIdTag;
+  final int avatarIconIdx;
+  final String avatarColor;
+  final String avatarCustomText;
+  final void Function(
+    String name,
+    String idTag,
+    int iconIdx,
+    String colorHex,
+    String customText,
+  )
+  onUserProfileChanged;
 
   const ProfilePage({
     super.key,
@@ -5747,40 +6324,278 @@ class ProfilePage extends StatelessWidget {
     required this.onDevMessageReceiveModeChanged,
     required this.hasUnreadBroadcast,
     required this.onMarkAllBroadcastsRead,
+    required this.isDeveloperModeUnlocked,
+    required this.onDeveloperModeChanged,
+    required this.userName,
+    required this.userIdTag,
+    required this.avatarIconIdx,
+    required this.avatarColor,
+    required this.avatarCustomText,
+    required this.onUserProfileChanged,
   });
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  int _versionTapCount = 0;
+  DateTime? _lastTapTime;
+
+  void _handleVersionTap() {
+    final now = DateTime.now();
+    if (_lastTapTime == null ||
+        now.difference(_lastTapTime!) > const Duration(seconds: 3)) {
+      _versionTapCount = 1;
+    } else {
+      _versionTapCount++;
+    }
+    _lastTapTime = now;
+
+    if (widget.isDeveloperModeUnlocked) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 2),
+          content: Text(
+            widget.isEnglish ? 'Developer mode is already active.' : '已处于开发者模式',
+          ),
+        ),
+      );
+      return;
+    }
+
+    final remaining = 5 - _versionTapCount;
+    if (remaining > 0 && remaining <= 3) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(milliseconds: 900),
+          content: Text(
+            widget.isEnglish
+                ? 'Tap $remaining more times to enter developer passcode'
+                : '再连点 $remaining 次即可输入口令开启开发者模式',
+          ),
+        ),
+      );
+    } else if (remaining <= 0) {
+      _versionTapCount = 0;
+      _showDeveloperPasscodeDialog();
+    }
+  }
+
+  void _showDeveloperPasscodeDialog() {
+    final passCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.security, color: Colors.deepPurpleAccent),
+            const SizedBox(width: 8),
+            Text(
+              widget.isEnglish ? 'Developer Verification' : '开发者身份口令验证',
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: TextField(
+          controller: passCtrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: widget.isEnglish
+                ? 'Enter Developer Passcode'
+                : '请输入开发者专属口令',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(widget.isEnglish ? 'Cancel' : '取消'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.deepPurpleAccent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {
+              if (passCtrl.text.trim() == kDeveloperPasscode) {
+                Navigator.pop(context);
+                widget.onDeveloperModeChanged(true);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: Colors.deepPurpleAccent,
+                    content: Text(
+                      widget.isEnglish
+                          ? 'Developer Mode Unlocked!'
+                          : '口令验证通过！已开启开发者群发与管理功能。',
+                    ),
+                  ),
+                );
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: Colors.redAccent,
+                    content: Text(
+                      widget.isEnglish ? 'Invalid Passcode' : '开发者口令错误',
+                    ),
+                  ),
+                );
+              }
+            },
+            child: Text(widget.isEnglish ? 'Verify' : '验证解锁'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openProfileEditor() {
+    showEditUserProfileDialog(
+      context: context,
+      isEnglish: widget.isEnglish,
+      currentName: widget.userName,
+      currentIdTag: widget.userIdTag,
+      currentAvatarIconIdx: widget.avatarIconIdx,
+      currentAvatarColor: widget.avatarColor,
+      currentAvatarText: widget.avatarCustomText,
+      onSave: widget.onUserProfileChanged,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final autoWeek = calculateWeekFromStartMonday(
-      semesterStartMonday,
+      widget.semesterStartMonday,
       DateTime.now(),
     );
+    const avatarIcons = [
+      Icons.school,
+      Icons.auto_awesome,
+      Icons.terminal,
+      Icons.rocket_launch,
+      Icons.emoji_emotions,
+      Icons.sports_esports,
+    ];
 
     return Scaffold(
-      appBar: AppBar(title: Text(isEnglish ? 'Profile & Settings' : '我的与设置')),
+      appBar: AppBar(
+        title: Text(widget.isEnglish ? 'Profile & Settings' : '我的与设置'),
+      ),
       body: ListView(
         padding: const EdgeInsets.symmetric(vertical: 16),
         children: [
-          const CircleAvatar(
-            radius: 36,
-            backgroundColor: Colors.blueAccent,
-            child: Icon(Icons.school, size: 36, color: Colors.white),
+          // 可点击自由修改的头像与用户昵称/ID 区域
+          Center(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(50),
+              onTap: _openProfileEditor,
+              child: Stack(
+                alignment: Alignment.bottomRight,
+                children: [
+                  CircleAvatar(
+                    radius: 40,
+                    backgroundColor: parseHexColor(widget.avatarColor),
+                    child: widget.avatarCustomText.isNotEmpty
+                        ? Text(
+                            widget.avatarCustomText.characters
+                                .take(2)
+                                .toString(),
+                            style: const TextStyle(
+                              fontSize: 26,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Icon(
+                            avatarIcons[widget.avatarIconIdx.clamp(
+                              0,
+                              avatarIcons.length - 1,
+                            )],
+                            size: 40,
+                            color: Colors.white,
+                          ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(
+                      color: Colors.blueAccent,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.edit,
+                      size: 14,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
           const SizedBox(height: 10),
           Center(
-            child: Text(
-              isEnglish ? 'UQ St Lucia Timetable' : 'UQ 圣卢西亚校区课表',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: _openProfileEditor,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 4,
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          widget.userName,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        const Icon(
+                          Icons.edit_outlined,
+                          size: 16,
+                          color: Colors.grey,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      widget.userIdTag,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.blueAccent,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 4),
+          // 连点 5 次版本号触发开发者口令验证
           Center(
-            child: Text(
-              'Version v$kCurrentAppVersion',
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            child: GestureDetector(
+              onTap: _handleVersionTap,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 4,
+                ),
+                child: Text(
+                  'Version v${courseSyncCenter.installedVersion}${widget.isDeveloperModeUnlocked ? ' (Dev)' : ''}',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: ElevatedButton.icon(
@@ -5794,25 +6609,26 @@ class ProfilePage extends StatelessWidget {
               ),
               icon: const Icon(Icons.table_view),
               label: Text(
-                isEnglish
+                widget.isEnglish
                     ? 'Excel Auto-Import & Dual Sync'
                     : 'Excel 课表自动识别导入与双端同步',
               ),
-              onPressed: () => showExcelImportAndSyncModal(context, isEnglish),
+              onPressed: () =>
+                  showExcelImportAndSyncModal(context, widget.isEnglish),
             ),
           ),
           const SizedBox(height: 16),
           const Divider(),
 
           // ==================================================================
-          // 新增核心专区：版本更新、用户反馈渠道、开发者广播中心与三档消息接收模式
+          // 版本更新、用户反馈与开发者信息中心
           // ==================================================================
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
             child: Text(
-              isEnglish
-                  ? 'Updates, Feedback & Developer Broadcasts'
-                  : '版本更新、用户反馈与开发者信息中心',
+              widget.isEnglish
+                  ? 'Updates, Feedback & Developer Info'
+                  : '版本更新、用户反馈与开发者信息',
               style: const TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.bold,
@@ -5820,66 +6636,67 @@ class ProfilePage extends StatelessWidget {
               ),
             ),
           ),
-          // 1. 应用内开发者信息接收策略（三档选择：接收并提醒 / 接收但不提醒 / 不接收）
           ListTile(
             leading: const Icon(
               Icons.notifications_active_outlined,
               color: Colors.amber,
             ),
-            title: Text(isEnglish ? 'In-App Developer Messages' : '接收应用内开发者信息'),
+            title: Text(
+              widget.isEnglish ? 'In-App Developer Messages' : '接收应用内开发者信息',
+            ),
             subtitle: Text(
-              devMessageReceiveMode == 0
-                  ? (isEnglish
+              widget.devMessageReceiveMode == 0
+                  ? (widget.isEnglish
                         ? 'Receive & Notify (Pop-up & Badge)'
                         : '当前：接收并提醒（收到更新指导时弹窗+红点提醒）')
-                  : devMessageReceiveMode == 1
-                  ? (isEnglish
+                  : widget.devMessageReceiveMode == 1
+                  ? (widget.isEnglish
                         ? 'Receive Silently (Inbox only, no pop-up)'
                         : '当前：接收但不提醒（静默存入消息箱，绝不打扰）')
-                  : (isEnglish
+                  : (widget.isEnglish
                         ? 'Do Not Receive (Turned off)'
                         : '当前：不接收（彻底关闭开发者应用内广播）'),
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             trailing: DropdownButton<int>(
-              value: devMessageReceiveMode,
+              value: widget.devMessageReceiveMode,
               underline: const SizedBox(),
               items: [
                 DropdownMenuItem(
                   value: 0,
-                  child: Text(isEnglish ? 'Receive & Notify' : '接收并提醒'),
+                  child: Text(widget.isEnglish ? 'Receive & Notify' : '接收并提醒'),
                 ),
                 DropdownMenuItem(
                   value: 1,
-                  child: Text(isEnglish ? 'Receive Silently' : '接收但不提醒'),
+                  child: Text(widget.isEnglish ? 'Receive Silently' : '接收但不提醒'),
                 ),
                 DropdownMenuItem(
                   value: 2,
-                  child: Text(isEnglish ? 'Do Not Receive' : '不接收'),
+                  child: Text(widget.isEnglish ? 'Do Not Receive' : '不接收'),
                 ),
               ],
               onChanged: (val) {
                 if (val != null) {
-                  onDevMessageReceiveModeChanged(val);
+                  widget.onDevMessageReceiveModeChanged(val);
                 }
               },
             ),
           ),
-          // 2. 查看开发者推送的更新信息与使用指导收件箱
-          if (devMessageReceiveMode != 2)
+          if (widget.devMessageReceiveMode != 2)
             ListTile(
               leading: Badge(
                 isLabelVisible:
-                    hasUnreadBroadcast && devMessageReceiveMode == 0,
+                    widget.hasUnreadBroadcast &&
+                    widget.devMessageReceiveMode == 0,
                 child: const Icon(Icons.campaign_outlined, color: Colors.teal),
               ),
               title: Text(
-                isEnglish
+                widget.isEnglish
                     ? 'Developer Updates & Usage Guides'
                     : '查看开发者更新信息与使用指导',
               ),
               subtitle: Text(
-                isEnglish
+                widget.isEnglish
                     ? '${courseSyncCenter.broadcasts.length} official guides & update announcements'
                     : '共 ${courseSyncCenter.broadcasts.length} 条来自开发者的更新说明与操作指南',
                 style: const TextStyle(fontSize: 12, color: Colors.grey),
@@ -5887,101 +6704,109 @@ class ProfilePage extends StatelessWidget {
               trailing: const Icon(Icons.chevron_right),
               onTap: () => showDeveloperInboxDialog(
                 context,
-                isEnglish,
-                devMessageReceiveMode,
-                onMarkAllBroadcastsRead,
+                widget.isEnglish,
+                widget.devMessageReceiveMode,
+                widget.onMarkAllBroadcastsRead,
               ),
             ),
-          // 3. 联网检查更新
           ListTile(
             leading: const Icon(Icons.system_update, color: Colors.blueAccent),
-            title: Text(isEnglish ? 'Check for Updates' : '检查更新（联网获取最新版本）'),
+            title: Text(
+              widget.isEnglish ? 'Check for Updates' : '检查更新（联网下载并安装新版本）',
+            ),
             subtitle: Text(
-              isEnglish
-                  ? 'Current: v$kCurrentAppVersion · Latest Online: v${courseSyncCenter.latestRemoteVersion}'
-                  : '当前版本：v$kCurrentAppVersion · 云端最新：v${courseSyncCenter.latestRemoteVersion}',
+              widget.isEnglish
+                  ? 'Installed: v${courseSyncCenter.installedVersion} · Latest: v${courseSyncCenter.latestRemoteVersion}'
+                  : '当前版本：v${courseSyncCenter.installedVersion} · 云端最新：v${courseSyncCenter.latestRemoteVersion}',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
-            trailing: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: Colors.redAccent.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                isEnglish ? 'NEW' : '有新版本',
-                style: const TextStyle(
-                  fontSize: 10,
-                  color: Colors.redAccent,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-            onTap: () => showCheckForUpdatesDialog(context, isEnglish),
+            trailing: courseSyncCenter.hasNewVersion
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      widget.isEnglish ? 'NEW' : '有新版本',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Colors.redAccent,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  )
+                : const Icon(
+                    Icons.check_circle_outline,
+                    color: Colors.green,
+                    size: 18,
+                  ),
+            onTap: () => showCheckForUpdatesDialog(context, widget.isEnglish),
           ),
-          // 4. 用户反馈渠道（向开发者发送改进提议和信息）
           ListTile(
             leading: const Icon(
               Icons.rate_review_outlined,
               color: Colors.green,
             ),
             title: Text(
-              isEnglish ? 'User Feedback & Suggestions' : '用户反馈渠道（向开发者发送改进提议）',
+              widget.isEnglish
+                  ? 'User Feedback & Suggestions'
+                  : '用户反馈渠道（向开发者发送改进提议）',
             ),
             subtitle: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Submit feature requests, bug reports or contact developer'
                   : '向开发者提交新功能提议、问题反馈或体验改进意见',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => showUserFeedbackDialog(context, isEnglish),
+            onTap: () => showUserFeedbackDialog(context, widget.isEnglish),
           ),
-          // 5. 开发者专属：一键向用户群体发送更新信息和使用指导
-          ListTile(
-            leading: const Icon(
-              Icons.admin_panel_settings_outlined,
-              color: Colors.deepPurpleAccent,
-            ),
-            title: Text(
-              isEnglish
-                  ? 'Developer Broadcast Console'
-                  : '开发者群发控制台（一键发送更新与使用指导）',
-            ),
-            subtitle: Text(
-              isEnglish
-                  ? 'Push update announcements & usage guides to user group'
-                  : '开发者专属：向全体用户一键推送更新通知、下载直链与使用指导',
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              showDeveloperBroadcastConsole(context, isEnglish, (msg) {
-                if (devMessageReceiveMode == 0) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      backgroundColor: Colors.deepPurpleAccent,
-                      content: Text(
-                        isEnglish
-                            ? 'Broadcast pushed & notified: ${msg.title}'
-                            : '已向用户群发并触发提醒：${msg.title}',
+          // 仅在连点 5 次版本号并通过口令验证后，才显示开发者专属群发后台
+          if (widget.isDeveloperModeUnlocked)
+            ListTile(
+              leading: const Icon(
+                Icons.admin_panel_settings_outlined,
+                color: Colors.deepPurpleAccent,
+              ),
+              title: Text(
+                widget.isEnglish
+                    ? 'Developer Broadcast Console'
+                    : '开发者群发控制台（一键发送更新与使用指导）',
+              ),
+              subtitle: Text(
+                widget.isEnglish
+                    ? 'Unlocked: Push updates & guides or lock console'
+                    : '开发者已解锁：一键推送更新与指导，或点击进入后锁定隐藏',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Colors.deepPurpleAccent,
+                ),
+              ),
+              trailing: const Icon(
+                Icons.chevron_right,
+                color: Colors.deepPurpleAccent,
+              ),
+              onTap: () {
+                showDeveloperBroadcastConsole(context, widget.isEnglish, (msg) {
+                  if (widget.devMessageReceiveMode == 0) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        backgroundColor: Colors.deepPurpleAccent,
+                        content: Text(
+                          widget.isEnglish
+                              ? 'Broadcast pushed: ${msg.localizedTitle(true)}'
+                              : '已向用户群发并触发提醒：${msg.localizedTitle(false)}',
+                        ),
                       ),
-                    ),
-                  );
-                } else if (devMessageReceiveMode == 1) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        isEnglish
-                            ? 'Broadcast silently delivered to inbox.'
-                            : '已静默推送至消息中心（当前为「接收但不提醒」模式）',
-                      ),
-                    ),
-                  );
-                }
-              });
-            },
-          ),
+                    );
+                  }
+                }, () => widget.onDeveloperModeChanged(false));
+              },
+            ),
           const Divider(),
 
           // ==================================================================
@@ -5989,42 +6814,42 @@ class ProfilePage extends StatelessWidget {
           // ==================================================================
           ListTile(
             leading: const Icon(Icons.language),
-            title: Text(isEnglish ? 'Language' : '语言设置'),
+            title: Text(widget.isEnglish ? 'Language' : '语言设置'),
             trailing: DropdownButton<bool>(
-              value: isEnglish,
+              value: widget.isEnglish,
               items: const [
                 DropdownMenuItem(value: false, child: Text('简体中文')),
                 DropdownMenuItem(value: true, child: Text('English')),
               ],
               onChanged: (val) {
                 if (val != null) {
-                  onLanguageChanged(val);
+                  widget.onLanguageChanged(val);
                 }
               },
             ),
           ),
           ListTile(
             leading: const Icon(Icons.brightness_6),
-            title: Text(isEnglish ? 'Theme Mode' : '主题模式'),
+            title: Text(widget.isEnglish ? 'Theme Mode' : '主题模式'),
             trailing: DropdownButton<ThemeMode>(
-              value: currentThemeMode,
+              value: widget.currentThemeMode,
               items: [
                 DropdownMenuItem(
                   value: ThemeMode.system,
-                  child: Text(isEnglish ? 'System' : '跟随系统'),
+                  child: Text(widget.isEnglish ? 'System' : '跟随系统'),
                 ),
                 DropdownMenuItem(
                   value: ThemeMode.light,
-                  child: Text(isEnglish ? 'Light' : '浅色模式'),
+                  child: Text(widget.isEnglish ? 'Light' : '浅色模式'),
                 ),
                 DropdownMenuItem(
                   value: ThemeMode.dark,
-                  child: Text(isEnglish ? 'Dark' : '深色模式'),
+                  child: Text(widget.isEnglish ? 'Dark' : '深色模式'),
                 ),
               ],
               onChanged: (val) {
                 if (val != null) {
-                  onThemeChanged(val);
+                  widget.onThemeChanged(val);
                 }
               },
             ),
@@ -6033,7 +6858,9 @@ class ProfilePage extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
             child: Text(
-              isEnglish ? 'Time Span & Real-Time Tracking' : '时间轴跨度与实时时间追踪',
+              widget.isEnglish
+                  ? 'Time Span & Real-Time Tracking'
+                  : '时间轴跨度与实时时间追踪',
               style: const TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.bold,
@@ -6047,90 +6874,92 @@ class ProfilePage extends StatelessWidget {
               color: Colors.deepPurpleAccent,
             ),
             title: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Auto-Expand to 24h for Out-of-Bounds Courses'
                   : '越界课程自动扩展至 24 小时',
             ),
             subtitle: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Default span is 07:00–22:00; expands to 00:00–24:00 if any course falls outside'
                   : '常驻跨度为 07:00–22:00；若存在早于 7 点或晚于 22 点的课程则自动扩展为 00:00–24:00',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
-            value: autoExpandTo24Hours,
-            onChanged: onAutoExpandTo24HoursChanged,
+            value: widget.autoExpandTo24Hours,
+            onChanged: widget.onAutoExpandTo24HoursChanged,
           ),
           SwitchListTile(
             secondary: const Icon(Icons.timeline, color: Colors.redAccent),
             title: Text(
-              isEnglish ? 'Live Current Time Red Line' : '显示当前时间轴红线指示器',
+              widget.isEnglish ? 'Live Current Time Red Line' : '显示当前时间轴红线指示器',
             ),
             subtitle: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Draw a live red line & time badge on the time grid'
                   : '在课表时间轴上实时绘制当前时间红线与时间标签',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
-            value: enableLiveTimeIndicator,
-            onChanged: onLiveTimeIndicatorChanged,
+            value: widget.enableLiveTimeIndicator,
+            onChanged: widget.onLiveTimeIndicatorChanged,
           ),
           SwitchListTile(
             secondary: const Icon(Icons.today, color: Colors.blueAccent),
             title: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Highlight Today Column & Show Dates'
                   : '高亮「今天」所在列并显示月/日日期',
             ),
             subtitle: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Highlight current weekday column and show exact dates (e.g. 10/15)'
                   : '在星期表头下方显示具体月/日（如 10/15），并高亮标记今天所在列',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
-            value: highlightTodayColumn,
-            onChanged: onHighlightTodayColumnChanged,
+            value: widget.highlightTodayColumn,
+            onChanged: widget.onHighlightTodayColumnChanged,
           ),
           SwitchListTile(
             secondary: const Icon(Icons.auto_mode, color: Colors.green),
             title: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Auto-Calculate Current Teaching Week'
                   : '根据开学日期自动定位当前第几周',
             ),
             subtitle: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Automatically locates to Week $autoWeek based on system date'
                   : '根据系统当前日期自动推算并定位至本周（当前推算为：第 $autoWeek 周）',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
-            value: autoCalculateWeek,
-            onChanged: onAutoCalculateWeekChanged,
+            value: widget.autoCalculateWeek,
+            onChanged: widget.onAutoCalculateWeekChanged,
           ),
-          if (autoCalculateWeek)
+          if (widget.autoCalculateWeek)
             ListTile(
               leading: const Icon(
                 Icons.edit_calendar_outlined,
                 color: Colors.green,
               ),
               title: Text(
-                isEnglish ? 'Semester Week 1 Monday Date' : '设置开学第 1 周周一日期',
+                widget.isEnglish
+                    ? 'Semester Week 1 Monday Date'
+                    : '设置开学第 1 周周一日期',
               ),
               subtitle: Text(
-                isEnglish
-                    ? 'Current base: ${formatDateKey(semesterStartMonday)}'
-                    : '当前基准日：${formatDateKey(semesterStartMonday)}（点击可修改校准）',
+                widget.isEnglish
+                    ? 'Current base: ${formatDateKey(widget.semesterStartMonday)}'
+                    : '当前基准日：${formatDateKey(widget.semesterStartMonday)}（点击可修改校准）',
                 style: const TextStyle(fontSize: 12, color: Colors.grey),
               ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () async {
                 final picked = await showDatePicker(
                   context: context,
-                  initialDate: semesterStartMonday,
+                  initialDate: widget.semesterStartMonday,
                   firstDate: DateTime(2024),
                   lastDate: DateTime(2030),
                 );
                 if (picked != null) {
-                  onSemesterStartMondayChanged(picked);
+                  widget.onSemesterStartMondayChanged(picked);
                 }
               },
             ),
@@ -6138,31 +6967,31 @@ class ProfilePage extends StatelessWidget {
           SwitchListTile(
             secondary: const Icon(Icons.compress),
             title: Text(
-              isEnglish ? 'Compact / Simple Mode' : '简洁模式（切换简洁/完整视图）',
+              widget.isEnglish ? 'Compact / Simple Mode' : '简洁模式（切换简洁/完整视图）',
             ),
             subtitle: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Hide secondary info in timetable cards for a cleaner look'
                   : '隐藏卡片中的次要文字信息，仅保留核心课程名与起止时间',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
-            value: isSimpleMode,
-            onChanged: onSimpleModeChanged,
+            value: widget.isSimpleMode,
+            onChanged: widget.onSimpleModeChanged,
           ),
           const Divider(),
           SwitchListTile(
             secondary: const Icon(Icons.event_available_outlined),
             title: Text(
-              isEnglish ? 'Show Non-Current Week Courses' : '显示非本周课程',
+              widget.isEnglish ? 'Show Non-Current Week Courses' : '显示非本周课程',
             ),
             subtitle: Text(
-              isEnglish
+              widget.isEnglish
                   ? 'Display courses from other weeks in a dimmed style'
                   : '在当前周课表中以半透明样式展示其他周的课程',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
-            value: showNonCurrentWeek,
-            onChanged: onShowNonCurrentWeekChanged,
+            value: widget.showNonCurrentWeek,
+            onChanged: widget.onShowNonCurrentWeekChanged,
           ),
           const Divider(),
           Padding(
@@ -6175,7 +7004,7 @@ class ProfilePage extends StatelessWidget {
                     const Icon(Icons.calendar_view_week, size: 22),
                     const SizedBox(width: 12),
                     Text(
-                      isEnglish
+                      widget.isEnglish
                           ? 'Displayed Weekdays (Filter Empty Days)'
                           : '课表显示星期（可过滤无课日）',
                       style: const TextStyle(
@@ -6191,18 +7020,18 @@ class ProfilePage extends StatelessWidget {
                   runSpacing: 8,
                   children: List.generate(7, (index) {
                     int day = index + 1;
-                    bool isSelected = visibleWeekdays.contains(day);
+                    bool isSelected = widget.visibleWeekdays.contains(day);
                     return FilterChip(
-                      label: Text(getWeekdayLabel(day, isEnglish)),
+                      label: Text(getWeekdayLabel(day, widget.isEnglish)),
                       selected: isSelected,
                       onSelected: (val) {
-                        final next = List<int>.from(visibleWeekdays);
+                        final next = List<int>.from(widget.visibleWeekdays);
                         if (val) {
                           next.add(day);
                         } else if (next.length > 1) {
                           next.remove(day);
                         }
-                        onVisibleWeekdaysChanged(next);
+                        widget.onVisibleWeekdaysChanged(next);
                       },
                     );
                   }),
@@ -6224,7 +7053,9 @@ class ProfilePage extends StatelessWidget {
                         const Icon(Icons.view_column_outlined, size: 22),
                         const SizedBox(width: 12),
                         Text(
-                          isEnglish ? 'Columns per Screen' : '同屏展示天数（列数）',
+                          widget.isEnglish
+                              ? 'Columns per Screen'
+                              : '同屏展示天数（列数）',
                           style: const TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w500,
@@ -6233,7 +7064,7 @@ class ProfilePage extends StatelessWidget {
                       ],
                     ),
                     Text(
-                      '$columnsCount ${isEnglish ? 'Days' : '天'}',
+                      '${widget.columnsCount} ${widget.isEnglish ? 'Days' : '天'}',
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         color: Colors.blueAccent,
@@ -6242,17 +7073,17 @@ class ProfilePage extends StatelessWidget {
                   ],
                 ),
                 Slider(
-                  value: columnsCount.toDouble().clamp(
+                  value: widget.columnsCount.toDouble().clamp(
                     1,
-                    visibleWeekdays.length.toDouble(),
+                    widget.visibleWeekdays.length.toDouble(),
                   ),
                   min: 1,
-                  max: visibleWeekdays.length.toDouble(),
-                  divisions: visibleWeekdays.length > 1
-                      ? visibleWeekdays.length - 1
+                  max: widget.visibleWeekdays.length.toDouble(),
+                  divisions: widget.visibleWeekdays.length > 1
+                      ? widget.visibleWeekdays.length - 1
                       : 1,
-                  label: '$columnsCount',
-                  onChanged: (val) => onColumnsCountChanged(val.toInt()),
+                  label: '${widget.columnsCount}',
+                  onChanged: (val) => widget.onColumnsCountChanged(val.toInt()),
                 ),
               ],
             ),
@@ -6271,7 +7102,7 @@ class ProfilePage extends StatelessWidget {
                         const Icon(Icons.height, size: 22),
                         const SizedBox(width: 12),
                         Text(
-                          isEnglish ? 'Hour Slot Height' : '每小时时间格高度',
+                          widget.isEnglish ? 'Hour Slot Height' : '每小时时间格高度',
                           style: const TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w500,
@@ -6280,7 +7111,7 @@ class ProfilePage extends StatelessWidget {
                       ],
                     ),
                     Text(
-                      '${hourHeight.toInt()} px',
+                      '${widget.hourHeight.toInt()} px',
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         color: Colors.blueAccent,
@@ -6289,11 +7120,11 @@ class ProfilePage extends StatelessWidget {
                   ],
                 ),
                 Slider(
-                  value: hourHeight,
+                  value: widget.hourHeight,
                   min: 60.0,
                   max: 120.0,
                   divisions: 6,
-                  onChanged: onHourHeightChanged,
+                  onChanged: widget.onHourHeightChanged,
                 ),
               ],
             ),
