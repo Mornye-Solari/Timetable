@@ -144,7 +144,6 @@ String? getHolidayName(DateTime dt, bool isEn) {
     '05-01': '劳动节 (Labour Day)',
     '10-01': '国庆节 (National Day)',
     '10-05': '国王诞辰纪念日 (King\'s Birthday)',
-    '10-16': '校园开放体验日 (Campus Open Day)',
     '12-25': '圣诞节 (Christmas Day)',
     '12-26': '节礼日 (Boxing Day)',
   };
@@ -155,7 +154,6 @@ String? getHolidayName(DateTime dt, bool isEn) {
     '05-01': 'Labour Day',
     '10-01': 'National Day',
     '10-05': 'King\'s Birthday Holiday',
-    '10-16': 'Campus Open Day',
     '12-25': 'Christmas Day',
     '12-26': 'Boxing Day',
   };
