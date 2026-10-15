@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timetable_app/src/rust/api/simple.dart';
 import 'package:timetable_app/src/rust/frb_generated.dart';
@@ -88,7 +90,7 @@ class DeveloperBroadcastMessage {
 }
 
 // ============================================================================
-// 时间轴坐标与教学周计算辅助函数
+// 时间轴坐标、教学周与节假日计算辅助函数
 // ============================================================================
 int timeStringToMinutes(String timeStr) {
   final parts = timeStr.trim().split(':');
@@ -129,6 +131,35 @@ DateTime getDateForWeekAndDay(DateTime startMonday, int week, int weekday) {
 
 String formatDateKey(DateTime dt) =>
     '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+
+// 识别公历与澳洲/中国常见节假日（用于接入手机日历后在日程与课表中展示）
+String? getHolidayName(DateTime dt, bool isEn) {
+  final key =
+      '${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+  const zhHolidays = {
+    '01-01': '元旦 (New Year)',
+    '01-26': '澳大利亚日 (Australia Day)',
+    '04-25': '澳新军团日 (ANZAC Day)',
+    '05-01': '劳动节 (Labour Day)',
+    '10-01': '国庆节 (National Day)',
+    '10-05': '国王诞辰纪念日 (King\'s Birthday)',
+    '10-16': '校园开放体验日 (Campus Open Day)',
+    '12-25': '圣诞节 (Christmas Day)',
+    '12-26': '节礼日 (Boxing Day)',
+  };
+  const enHolidays = {
+    '01-01': 'New Year\'s Day',
+    '01-26': 'Australia Day',
+    '04-25': 'ANZAC Day',
+    '05-01': 'Labour Day',
+    '10-01': 'National Day',
+    '10-05': 'King\'s Birthday Holiday',
+    '10-16': 'Campus Open Day',
+    '12-25': 'Christmas Day',
+    '12-26': 'Boxing Day',
+  };
+  return isEn ? enHolidays[key] : zhHolidays[key];
+}
 
 // ============================================================================
 // 单日/未来额外日程事件模型 (Schedule Event)
@@ -202,8 +233,8 @@ class ScheduleEvent {
 // 全局双端同步、本地持久化、开发者广播与更新中心
 // ============================================================================
 class CourseSyncController extends ChangeNotifier {
-  static const String _storageKeyData = 'saved_timetable_sync_json_v1';
-  static const String _storageKeyBroadcasts = 'saved_dev_broadcasts_v2';
+  static const String _storageKeyData = 'saved_timetable_sync_json_v2';
+  static const String _storageKeyBroadcasts = 'saved_dev_broadcasts_v3';
   static const String _storageKeyFeedbackList = 'saved_user_feedbacks_v1';
 
   List<Course> _courses = [];
@@ -211,9 +242,10 @@ class CourseSyncController extends ChangeNotifier {
   List<DeveloperBroadcastMessage> _broadcasts = [];
   List<Map<String, String>> _localFeedbackHistory = [];
 
-  String _installedVersion = '1.1.0';
+  String _installedVersion = '1.2.0';
   String _latestRemoteVersion = '1.2.0';
-  String _latestDownloadUrl = '';
+  String _latestDownloadUrl =
+      'https://mornye-solari.github.io/Timetable/Timetable_v1.2.0.apk';
 
   List<Course> get courses => List.unmodifiable(_courses);
   List<ScheduleEvent> get events => List.unmodifiable(_events);
@@ -226,6 +258,15 @@ class CourseSyncController extends ChangeNotifier {
   String get latestDownloadUrl => _latestDownloadUrl;
   bool get hasNewVersion => _installedVersion != _latestRemoteVersion;
 
+  // 供首次使用、尚未注册的用户展示的通用示例课表（不含开发者个人隐私信息）
+  static const String sampleExcelRawData = '''
+Subject Code\tDescription\tGroup\tActivity\tDay\tTime\tCampus\tLocation\tStaff\tDuration\tDates
+CS101_DEMO\tComputer Science Intro (示例课程)\tLEC01\t01\tMon\t09:00\tMain\tBuilding A101 (示例教室)\tProf. Smith\t2 hrs\t01/09
+MATH102_DEMO\tLinear Algebra & Calculus (示例)\tTUT01\t02\tWed\t10:00\tMain\tScience Bldg B205\tDr. Taylor\t2 hrs\t02/09
+ENG103_DEMO\tAcademic Writing Workshop (示例)\tSEM01\t01\tFri\t14:00\tMain\tHumanities C302\tDr. Davis\t2 hrs\t04/09
+''';
+
+  // 开发者本人的课表模板（可在 Excel 导入弹窗或开发者模式下一键载入）
   static const String uploadedExcelRawData = '''
 Subject Code\tDescription\tGroup\tActivity\tDay\tTime\tCampus\tLocation\tStaff\tDuration\tDates
 COMP1100_S2_2026_STLUCIA_62308_IN\tIntroduction to Software Innovation\tSTU01\t01\tWed\t09:00\tSTLUCIA\t11A-120/121 - ModWest\tIan Clough\t3 hrs\t14/10
@@ -241,11 +282,12 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
 
   Future<void> initialize() async {
     _installedVersion =
-        globalPrefs.getString('pref_installed_version') ?? '1.1.0';
+        globalPrefs.getString('pref_installed_version') ?? '1.2.0';
     _latestRemoteVersion =
         globalPrefs.getString('pref_latest_remote_version') ?? '1.2.0';
     _latestDownloadUrl =
-        globalPrefs.getString('pref_latest_download_url') ?? '';
+        globalPrefs.getString('pref_latest_download_url') ??
+        'https://mornye-solari.github.io/Timetable/Timetable_v1.2.0.apk';
 
     final savedBroadcastsJson = globalPrefs.getString(_storageKeyBroadcasts);
     if (savedBroadcastsJson != null && savedBroadcastsJson.isNotEmpty) {
@@ -267,31 +309,32 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
           titleEn: 'Welcome to Timetable Workspace · Quick Start Guide',
           category: 'guide',
           content:
-              '1. 【Excel 导入】点击顶栏上传图标，可直接粘贴教务系统导出的 Excel 行，自动识别科目、时长与教室。\n'
-              '2. 【双端同步】在电脑端复制同步码，粘贴至手机端即可秒级同步课表与待办。\n'
-              '3. 【视图定制】在「我的」设置中可自由过滤无课星期、调整同屏列数（≤3列自动展开完整详情）以及开启 24h 动态扩展。',
+              '1. 【示例说明】当前展示的是通用示例课表，你可以点击右上角上传图标粘贴导入自己的 Excel 课表，或点击「+」号手动添加。\n'
+              '2. 【个人资料】在「我的」页面点击头像可选择手机/电脑本地照片作为头像，并修改你的昵称与学号签名。\n'
+              '3. 【桌面小组件与节假日】可在「我的」页面开启可选桌面小组件及手机日历节假日显示。',
           contentEn:
-              '1. [Excel Import] Tap the upload icon on the top bar to paste rows directly from your university Excel timetable.\n'
-              '2. [Dual-End Sync] Copy the sync code on PC Web and paste it on your phone to sync classes and tasks instantly.\n'
-              '3. [Custom View] Filter empty weekdays, adjust columns per screen (≤3 columns auto-expand full details), or enable 24h auto-expansion in Profile.',
-          dateStr: '2026-10-15',
+              '1. [Sample Timetable] Currently showing sample courses. Tap the upload icon to import your own Excel timetable or tap "+" to add classes.\n'
+              '2. [Custom Profile] Tap your avatar in Profile to pick a local photo from your phone/PC and edit your name & ID.\n'
+              '3. [Widget & Holidays] Enable the optional Home Widget and Phone Calendar Holidays in Profile settings.',
+          dateStr: '2026-10-16',
         ),
         DeveloperBroadcastMessage(
           id: 'msg_update_120',
-          title: 'v1.2.0 版本更新说明：本地持久化与自定义资料',
-          titleEn: 'v1.2.0 Release Notes: Full Persistence & Custom Profile',
+          title: 'v1.2.0 版本更新：权限管理、本地相册头像与桌面小组件',
+          titleEn: 'v1.2.0 Update: Permissions, Local Photo Avatar & Widget',
           category: 'update',
           content:
-              '• 新增全量本地持久化存储，重启 App 完美记忆语言、主题、所有开关与课程修改。\n'
-              '• 支持自定义修改个人头像、昵称与 ID。\n'
-              '• 内置应用内 OTA 更新安装器与中英双语通知适配。',
+              '• 新增日历、通知、存储、定位、联网五大系统权限管理与手机日历节假日显示开关。\n'
+              '• 支持从手机相册或电脑本地选择照片作为用户头像，新增可选桌面小组件。\n'
+              '• 新增离线使用/手机号注册切换入口，新用户默认展示无隐私通用示例课表。',
           contentEn:
-              '• Full local persistence via SharedPreferences: remembers language, theme, switches, and course edits across restarts.\n'
-              '• Customizable user avatar, nickname, and ID.\n'
-              '• Built-in OTA package installer and full bilingual notification support.',
-          dateStr: '2026-10-15',
+              '• Added Calendar, Notification, Storage, Location & Network permissions manager and Calendar Holidays switch.\n'
+              '• Support picking local photos from device gallery as avatar, plus an optional Today Desktop Widget.\n'
+              '• Added subtle Offline/Phone registration switch and clean sample data for new users.',
+          dateStr: '2026-10-16',
           targetVersion: '1.2.0',
-          downloadUrl: '',
+          downloadUrl:
+              'https://mornye-solari.github.io/Timetable/Timetable_v1.2.0.apk',
         ),
       ];
       await _persistBroadcasts();
@@ -314,38 +357,24 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
         notifyListeners();
         return;
       } catch (e) {
-        debugPrint(
-          "Failed to parse saved courses, falling back to default: $e",
-        );
+        debugPrint("Failed to parse saved courses, falling back to sample: $e");
       }
     }
 
-    final parsedFromExcel = parseExcelTableText(uploadedExcelRawData);
-    _courses = List.from(parsedFromExcel);
+    // 首次使用、未注册用户默认载入通用示例课表，不暴露开发者个人课表
+    final parsedFromSample = parseExcelTableText(sampleExcelRawData);
+    _courses = List.from(parsedFromSample);
 
     final todayKey = formatDateKey(DateTime.now());
-    final tomorrowKey = formatDateKey(
-      DateTime.now().add(const Duration(days: 1)),
-    );
     _events = [
       ScheduleEvent(
-        id: 'evt_1',
-        title: 'CSSE2310 Assignment 3 Due',
+        id: 'evt_demo_1',
+        title: '示例待办：点击右上角「新增事件」添加你的日程',
         dateStr: todayKey,
-        timeStr: '20:00',
-        location: 'Gradescope / Git',
-        note: 'Check memory leaks with Valgrind before submission',
-        color: '#E91E63',
-        isCompleted: false,
-      ),
-      ScheduleEvent(
-        id: 'evt_2',
-        title: 'COMP1100 Group Sprint Meeting',
-        dateStr: tomorrowKey,
-        timeStr: '14:00',
-        location: 'Central Library Duhig Room',
-        note: 'Prepare prototype demo slides',
-        color: '#FF9800',
+        timeStr: '18:00',
+        location: '图书馆 / 自习室 (示例)',
+        note: '可在「我的」页面导入你自己的 Excel 课表',
+        color: '#3F51B5',
         isCompleted: false,
       ),
     ];
@@ -719,6 +748,15 @@ final CourseSyncController courseSyncCenter = CourseSyncController();
 
 String trName(String name, bool isEn) {
   if (!isEn) {
+    if (name.startsWith('CS101')) {
+      return name.replaceFirst('CS101', 'CS101 计算机科学导论 (示例)');
+    }
+    if (name.startsWith('MATH102')) {
+      return name.replaceFirst('MATH102', 'MATH102 高等数学与线性代数 (示例)');
+    }
+    if (name.startsWith('ENG103')) {
+      return name.replaceFirst('ENG103', 'ENG103 学术英语写作 (示例)');
+    }
     if (name.startsWith('COMP1100')) {
       return name.replaceFirst('COMP1100', 'COMP1100 软件创新导论');
     }
@@ -733,12 +771,6 @@ String trName(String name, bool isEn) {
     }
     return name;
   }
-  if (name == '软件工程课') {
-    return 'Software Engineering';
-  }
-  if (name == '高级算法') {
-    return 'Advanced Algorithms';
-  }
   return name;
 }
 
@@ -746,21 +778,12 @@ String trLocation(String loc, bool isEn) {
   if (!isEn && loc == 'Delayed viewing (Clashable)') {
     return '录播回放 (允许冲突)';
   }
-  if (isEn && loc == '教学楼 A302') {
-    return 'Building A302';
-  }
-  if (isEn && loc == '科研楼 B105') {
-    return 'Research Bldg B105';
-  }
   return loc;
 }
 
 String trTeacher(String t, bool isEn) {
   if (!isEn && t == 'TBA') {
     return '待定 (TBA)';
-  }
-  if (isEn && t == '教授') {
-    return 'Professor';
   }
   return t;
 }
@@ -781,21 +804,519 @@ Color parseHexColor(String hexStr) {
   }
 }
 
-IconData getAvatarIconByIndex(int idx) {
-  const icons = [
-    Icons.school,
+// ============================================================================
+// 新增功能 A：申请日历、通知、存储、定位、联网五大系统权限弹窗
+// ============================================================================
+Future<void> showPermissionsManagerDialog(
+  BuildContext context,
+  bool isEnglish,
+) async {
+  Future<Map<String, bool>> checkAllStatuses() async {
+    if (kIsWeb) {
+      return {
+        'calendar': true,
+        'notification': true,
+        'storage': true,
+        'location': true,
+        'internet': true,
+      };
+    }
+    final cal = await Permission.calendarFullAccess.status;
+    final notif = await Permission.notification.status;
+    final photos = await Permission.photos.status;
+    final storage = await Permission.storage.status;
+    final loc = await Permission.locationWhenInUse.status;
+    return {
+      'calendar': cal.isGranted,
+      'notification': notif.isGranted,
+      'storage': photos.isGranted || storage.isGranted,
+      'location': loc.isGranted,
+      'internet': true,
+    };
+  }
 
-    ///Icons.Auto_awesome,
-    Icons.terminal,
-    Icons.rocket_launch,
-    Icons.face_retouching_natural,
-    Icons.sports_esports,
-  ];
-  return icons[idx.clamp(0, icons.length - 1)];
+  Map<String, bool> statuses = await checkAllStatuses();
+  if (!context.mounted) {
+    return;
+  }
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setStateSB) {
+          Future<void> reqPerm(
+            Future<PermissionStatus> Function() action,
+          ) async {
+            if (!kIsWeb) {
+              await action();
+              statuses = await checkAllStatuses();
+              setStateSB(() {});
+            }
+          }
+
+          Widget buildPermTile({
+            required IconData icon,
+            required String title,
+            required String subtitle,
+            required bool granted,
+            required VoidCallback onRequest,
+          }) {
+            return ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                icon,
+                color: granted ? Colors.green : Colors.blueAccent,
+              ),
+              title: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              subtitle: Text(
+                subtitle,
+                style: const TextStyle(fontSize: 11.5, color: Colors.grey),
+              ),
+              trailing: granted
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        isEnglish ? 'Granted' : '已开启',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.green,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    )
+                  : OutlinedButton(
+                      onPressed: onRequest,
+                      child: Text(
+                        isEnglish ? 'Allow' : '去授权',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+            );
+          }
+
+          return AlertDialog(
+            title: Row(
+              children: [
+                const Icon(Icons.security_outlined, color: Colors.blueAccent),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    isEnglish ? 'System Permissions' : '系统权限申请与管理',
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 440,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    buildPermTile(
+                      icon: Icons.calendar_month_outlined,
+                      title: isEnglish ? 'Calendar Permission' : '手机日历权限',
+                      subtitle: isEnglish
+                          ? 'Sync schedule & public holidays'
+                          : '用于接入手机日历展示节假日与课程提醒',
+                      granted: statuses['calendar'] ?? false,
+                      onRequest: () => reqPerm(
+                        () => Permission.calendarFullAccess.request(),
+                      ),
+                    ),
+                    const Divider(height: 8),
+                    buildPermTile(
+                      icon: Icons.notifications_active_outlined,
+                      title: isEnglish ? 'Notification Permission' : '消息通知权限',
+                      subtitle: isEnglish
+                          ? 'Class reminders & update alerts'
+                          : '用于发送课前消息提醒与版本更新通知',
+                      granted: statuses['notification'] ?? false,
+                      onRequest: () =>
+                          reqPerm(() => Permission.notification.request()),
+                    ),
+                    const Divider(height: 8),
+                    buildPermTile(
+                      icon: Icons.photo_library_outlined,
+                      title: isEnglish
+                          ? 'Storage & Photos Permission'
+                          : '存储与本地相册权限',
+                      subtitle: isEnglish
+                          ? 'Pick local photo as avatar & import files'
+                          : '用于选择手机本地照片作为头像及读写课表',
+                      granted: statuses['storage'] ?? false,
+                      onRequest: () => reqPerm(() async {
+                        final p = await Permission.photos.request();
+                        if (!p.isGranted) {
+                          return await Permission.storage.request();
+                        }
+                        return p;
+                      }),
+                    ),
+                    const Divider(height: 8),
+                    buildPermTile(
+                      icon: Icons.location_on_outlined,
+                      title: isEnglish ? 'Location Permission' : '定位权限',
+                      subtitle: isEnglish
+                          ? 'Navigate to classroom buildings'
+                          : '用于上课教室导航与校区建筑定位',
+                      granted: statuses['location'] ?? false,
+                      onRequest: () =>
+                          reqPerm(() => Permission.locationWhenInUse.request()),
+                    ),
+                    const Divider(height: 8),
+                    buildPermTile(
+                      icon: Icons.wifi,
+                      title: isEnglish ? 'Network & OTA Update' : '联网与在线更新权限',
+                      subtitle: isEnglish
+                          ? 'Check for updates & dual-end sync'
+                          : '用于联网检查更新、拉取广播与双端同步',
+                      granted: statuses['internet'] ?? true,
+                      onRequest: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              if (!kIsWeb)
+                TextButton(
+                  onPressed: () => openAppSettings(),
+                  child: Text(isEnglish ? 'System Settings' : '系统设置'),
+                ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () async {
+                  if (!kIsWeb) {
+                    await [
+                      Permission.calendarFullAccess,
+                      Permission.notification,
+                      Permission.photos,
+                      Permission.storage,
+                      Permission.locationWhenInUse,
+                    ].request();
+                    statuses = await checkAllStatuses();
+                    setStateSB(() {});
+                  } else {
+                    Navigator.pop(context);
+                  }
+                },
+                child: Text(isEnglish ? 'Request All' : '一键申请全部权限'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(isEnglish ? 'Done' : '完成'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
 }
 
 // ============================================================================
-// 用户自定义头像与昵称/ID 编辑器弹窗
+// 新增功能 B：低调的「离线使用 / 手机号注册」切换弹窗
+// ============================================================================
+void showAccountModeDialog({
+  required BuildContext context,
+  required bool isEnglish,
+  required String currentPhone,
+  required ValueChanged<String> onPhoneSaved,
+}) {
+  final phoneCtrl = TextEditingController(text: currentPhone);
+  final codeCtrl = TextEditingController();
+  bool isOffline = currentPhone.isEmpty;
+  bool codeSent = false;
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setStateSB) {
+          return AlertDialog(
+            title: Text(
+              isEnglish ? 'Usage Mode & Registration' : '使用模式与账号绑定',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            content: SizedBox(
+              width: 380,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SegmentedButton<bool>(
+                    segments: [
+                      ButtonSegment(
+                        value: true,
+                        icon: const Icon(Icons.cloud_off_outlined, size: 16),
+                        label: Text(isEnglish ? 'Offline Mode' : '纯离线使用'),
+                      ),
+                      ButtonSegment(
+                        value: false,
+                        icon: const Icon(Icons.phone_iphone, size: 16),
+                        label: Text(isEnglish ? 'Phone Register' : '手机号注册'),
+                      ),
+                    ],
+                    selected: {isOffline},
+                    onSelectionChanged: (val) =>
+                        setStateSB(() => isOffline = val.first),
+                  ),
+                  const SizedBox(height: 16),
+                  if (isOffline)
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        isEnglish
+                            ? 'In Offline Mode, all timetable data and settings are stored locally on your device without requiring an account.'
+                            : '当前为纯离线使用模式：无需注册登录，所有课表、待办与个性化设置均保存在你设备本地，保护隐私且即开即用。',
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          height: 1.5,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    )
+                  else ...[
+                    TextField(
+                      controller: phoneCtrl,
+                      keyboardType: TextInputType.phone,
+                      decoration: InputDecoration(
+                        prefixIcon: const Icon(Icons.phone_outlined, size: 18),
+                        labelText: isEnglish ? 'Mobile Phone Number' : '输入手机号码',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: codeCtrl,
+                            keyboardType: TextInputType.number,
+                            decoration: InputDecoration(
+                              labelText: isEnglish
+                                  ? 'SMS Code (Any 4 digits)'
+                                  : '验证码 (输入任意4位数字)',
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () {
+                            if (phoneCtrl.text.trim().length < 5) {
+                              return;
+                            }
+                            setStateSB(() => codeSent = true);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  isEnglish
+                                      ? 'Verification code sent: 2026'
+                                      : '验证码已发送，测试验证码：2026',
+                                ),
+                              ),
+                            );
+                          },
+                          child: Text(
+                            codeSent
+                                ? (isEnglish ? 'Sent' : '已发送')
+                                : (isEnglish ? 'Get Code' : '获取验证码'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(isEnglish ? 'Cancel' : '取消'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () {
+                  if (isOffline) {
+                    onPhoneSaved('');
+                    Navigator.pop(context);
+                  } else {
+                    final p = phoneCtrl.text.trim();
+                    if (p.isEmpty || codeCtrl.text.trim().isEmpty) {
+                      return;
+                    }
+                    onPhoneSaved(p);
+                    Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        backgroundColor: Colors.green,
+                        content: Text(
+                          isEnglish ? 'Phone registered: $p' : '手机号注册/绑定成功：$p',
+                        ),
+                      ),
+                    );
+                  }
+                },
+                child: Text(isEnglish ? 'Confirm' : '保存设置'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+// ============================================================================
+// 新增功能 C：生成可选「桌面小组件 (Desktop / Home Screen Widget)」卡片
+// ============================================================================
+class TodayDesktopWidgetCard extends StatelessWidget {
+  final bool isEnglish;
+  final VoidCallback? onClose;
+
+  const TodayDesktopWidgetCard({
+    super.key,
+    required this.isEnglish,
+    this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final todayCourses =
+        courseSyncCenter.courses.where((c) => c.weekday == now.weekday).toList()
+          ..sort((a, b) => a.startTime.compareTo(b.startTime));
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF283593), Color(0xFF1565C0)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.blueAccent.withValues(alpha: 0.25),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.widgets_outlined,
+                color: Colors.white70,
+                size: 16,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                isEnglish
+                    ? 'TODAY WIDGET · ${getWeekdayLabel(now.weekday, true)} (${now.month}/${now.day})'
+                    : '今日课表小组件 · ${getWeekdayLabel(now.weekday, false)} (${now.month}月${now.day}日)',
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Spacer(),
+              if (onClose != null)
+                GestureDetector(
+                  onTap: onClose,
+                  child: const Icon(
+                    Icons.close,
+                    color: Colors.white60,
+                    size: 16,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (todayCourses.isEmpty)
+            Text(
+              isEnglish
+                  ? 'No classes today. Enjoy your day!'
+                  : '今日无排课，祝你度过轻松愉快的一天！',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: todayCourses.map((c) {
+                return Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    '${c.startTime} ${trName(c.name, isEnglish)} @ ${trLocation(c.location, isEnglish)}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// 新增功能 D：支持从手机相册/电脑选择本地照片的头像与资料编辑器
 // ============================================================================
 void showEditUserProfileDialog({
   required BuildContext context,
@@ -819,6 +1340,7 @@ void showEditUserProfileDialog({
   final avatarTextCtrl = TextEditingController(text: currentAvatarText);
   int tempIconIdx = currentAvatarIconIdx;
   String tempColor = currentAvatarColor;
+  String tempPhotoBase64 = globalPrefs.getString('pref_avatar_base64') ?? '';
 
   const avatarColors = [
     '#2979FF',
@@ -842,9 +1364,31 @@ void showEditUserProfileDialog({
     builder: (context) {
       return StatefulBuilder(
         builder: (context, setStateSB) {
+          Future<void> pickLocalImage() async {
+            try {
+              final picker = ImagePicker();
+              final XFile? picked = await picker.pickImage(
+                source: ImageSource.gallery,
+                maxWidth: 320,
+                maxHeight: 320,
+                imageQuality: 80,
+              );
+              if (picked != null) {
+                final bytes = await picked.readAsBytes();
+                setStateSB(() {
+                  tempPhotoBase64 = base64Encode(bytes);
+                });
+              }
+            } catch (e) {
+              debugPrint("Image picker error: $e");
+            }
+          }
+
           return AlertDialog(
             title: Text(
-              isEnglish ? 'Customize Profile & Avatar' : '修改个人头像与 ID 信息',
+              isEnglish
+                  ? 'Customize Profile & Local Photo'
+                  : '修改个人头像（支持本地照片）与 ID',
               style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
             ),
             content: SizedBox(
@@ -853,11 +1397,15 @@ void showEditUserProfileDialog({
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // 实时预览头像
                     CircleAvatar(
-                      radius: 38,
+                      radius: 42,
                       backgroundColor: parseHexColor(tempColor),
-                      child: avatarTextCtrl.text.trim().isNotEmpty
+                      backgroundImage: tempPhotoBase64.isNotEmpty
+                          ? MemoryImage(base64Decode(tempPhotoBase64))
+                          : null,
+                      child: tempPhotoBase64.isNotEmpty
+                          ? null
+                          : avatarTextCtrl.text.trim().isNotEmpty
                           ? Text(
                               avatarTextCtrl.text
                                   .trim()
@@ -879,13 +1427,40 @@ void showEditUserProfileDialog({
                               color: Colors.white,
                             ),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 10),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: pickLocalImage,
+                          icon: const Icon(
+                            Icons.photo_library_outlined,
+                            size: 16,
+                          ),
+                          label: Text(
+                            isEnglish ? 'Pick Local Photo' : '从手机/电脑相册选照片',
+                          ),
+                        ),
+                        if (tempPhotoBase64.isNotEmpty) ...[
+                          const SizedBox(width: 8),
+                          TextButton(
+                            onPressed: () =>
+                                setStateSB(() => tempPhotoBase64 = ''),
+                            child: Text(
+                              isEnglish ? 'Remove Photo' : '清除照片',
+                              style: const TextStyle(color: Colors.redAccent),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 14),
                     TextField(
                       controller: nameCtrl,
                       decoration: InputDecoration(
                         labelText: isEnglish
-                            ? 'Nickname / Display Name'
-                            : '用户昵称',
+                            ? 'Nickname / Timetable Title'
+                            : '用户昵称 / 课表名称',
                         prefixIcon: const Icon(Icons.person_outline),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
@@ -897,7 +1472,7 @@ void showEditUserProfileDialog({
                       controller: idCtrl,
                       decoration: InputDecoration(
                         labelText: isEnglish
-                            ? 'User ID / Student Number'
+                            ? 'User ID / Student ID'
                             : '个人 ID / 学号签名',
                         prefixIcon: const Icon(Icons.badge_outlined),
                         border: OutlineInputBorder(
@@ -909,11 +1484,11 @@ void showEditUserProfileDialog({
                     TextField(
                       controller: avatarTextCtrl,
                       maxLength: 2,
-                      onChanged: (_) => setStateSB(() {}),
+                      onChanged: (_) => setStateSB(() => tempPhotoBase64 = ''),
                       decoration: InputDecoration(
                         labelText: isEnglish
-                            ? 'Custom Avatar Text/Emoji (Leave empty to use icon)'
-                            : '自定义文字/Emoji头像（留空则使用下方图标）',
+                            ? 'Or Custom Text/Emoji Avatar'
+                            : '或输入文字/Emoji头像（选照片时自动忽略）',
                         prefixIcon: const Icon(Icons.text_fields),
                         counterText: '',
                         border: OutlineInputBorder(
@@ -921,28 +1496,18 @@ void showEditUserProfileDialog({
                         ),
                       ),
                     ),
-                    const SizedBox(height: 14),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        isEnglish ? 'Choose Avatar Icon:' : '选择头像图标：',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 10),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: List.generate(avatarIcons.length, (i) {
                         final isSel =
+                            tempPhotoBase64.isEmpty &&
                             tempIconIdx == i &&
                             avatarTextCtrl.text.trim().isEmpty;
                         return IconButton(
                           onPressed: () {
                             setStateSB(() {
+                              tempPhotoBase64 = '';
                               avatarTextCtrl.clear();
                               tempIconIdx = i;
                             });
@@ -957,19 +1522,7 @@ void showEditUserProfileDialog({
                         );
                       }),
                     ),
-                    const SizedBox(height: 10),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        isEnglish ? 'Avatar Theme Color:' : '选择头像背景色：',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 6),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: avatarColors.map((hex) {
@@ -977,12 +1530,12 @@ void showEditUserProfileDialog({
                           onTap: () => setStateSB(() => tempColor = hex),
                           child: CircleAvatar(
                             backgroundColor: parseHexColor(hex),
-                            radius: 16,
+                            radius: 15,
                             child: tempColor == hex
                                 ? const Icon(
                                     Icons.check,
                                     color: Colors.white,
-                                    size: 16,
+                                    size: 15,
                                   )
                                 : null,
                           ),
@@ -1005,11 +1558,12 @@ void showEditUserProfileDialog({
                 ),
                 onPressed: () {
                   final newName = nameCtrl.text.trim().isEmpty
-                      ? (isEnglish ? 'UQ Student' : '课表用户')
+                      ? (isEnglish ? 'My Timetable' : '我的示例课表')
                       : nameCtrl.text.trim();
                   final newId = idCtrl.text.trim().isEmpty
-                      ? 'ID: 49898680'
+                      ? 'ID: Guest_001'
                       : idCtrl.text.trim();
+                  globalPrefs.setString('pref_avatar_base64', tempPhotoBase64);
                   onSave(
                     newName,
                     newId,
@@ -1030,7 +1584,7 @@ void showEditUserProfileDialog({
 }
 
 // ============================================================================
-// 1. 联网检查更新 + 应用内安装包下载与安装界面（彻底解决跳转 404 问题）
+// 1. 联网检查更新 + 应用内安装包下载与安装界面
 // ============================================================================
 Future<void> showCheckForUpdatesDialog(
   BuildContext context,
@@ -1046,7 +1600,7 @@ Future<void> showCheckForUpdatesDialog(
           const SizedBox(width: 20),
           Expanded(
             child: Text(
-              isEnglish ? 'Checking update server...' : '正在连接更新服务器检查安装包...',
+              isEnglish ? 'Checking update server...' : '正在连接更新服务器检查最新安装包...',
             ),
           ),
         ],
@@ -1078,7 +1632,6 @@ Future<void> showCheckForUpdatesDialog(
       return StatefulBuilder(
         builder: (context, setStateSB) {
           Future<void> startInAppInstall() async {
-            // 如果开发者填写了真实的自定义外部 .apk 直链，则同时尝试唤起系统下载安装器
             final customUrl = courseSyncCenter.latestDownloadUrl.trim();
             if (customUrl.isNotEmpty && customUrl.startsWith('http')) {
               final uri = Uri.tryParse(customUrl);
@@ -1091,8 +1644,8 @@ Future<void> showCheckForUpdatesDialog(
               isDownloading = true;
               progress = 0.05;
               statusText = isEnglish
-                  ? 'Downloading app-arm64-v8a-release.apk...'
-                  : '正在下载安装包 app-arm64-v8a-release.apk...';
+                  ? 'Downloading Timetable_v$latestVer.apk...'
+                  : '正在下载安装包 Timetable_v$latestVer.apk...';
             });
 
             for (int i = 1; i <= 10; i++) {
@@ -1232,18 +1785,23 @@ Future<void> showCheckForUpdatesDialog(
                       onPressed: () => Navigator.pop(context),
                       child: Text(isEnglish ? 'Close' : '关闭'),
                     ),
-                    if (hasNew)
-                      ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blueAccent,
-                          foregroundColor: Colors.white,
-                        ),
-                        icon: const Icon(Icons.install_mobile, size: 18),
-                        label: Text(
-                          isEnglish ? 'Download & Install Now' : '立即下载并安装更新',
-                        ),
-                        onPressed: startInAppInstall,
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent,
+                        foregroundColor: Colors.white,
                       ),
+                      icon: const Icon(Icons.install_mobile, size: 18),
+                      label: Text(
+                        hasNew
+                            ? (isEnglish
+                                  ? 'Download & Install Now'
+                                  : '立即下载并安装更新')
+                            : (isEnglish
+                                  ? 'Reinstall Latest APK'
+                                  : '重新下载最新安装包'),
+                      ),
+                      onPressed: startInAppInstall,
+                    ),
                   ],
           );
         },
@@ -1430,7 +1988,7 @@ void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
 }
 
 // ============================================================================
-// 3. 用户端查看「开发者消息与使用指导中心」弹窗（100% 双语自适应）
+// 3. 用户端查看「开发者消息与使用指导中心」弹窗
 // ============================================================================
 void showDeveloperInboxDialog(
   BuildContext context,
@@ -1579,7 +2137,7 @@ void showDeveloperInboxDialog(
 }
 
 // ============================================================================
-// 4. 开发者专属隐藏后台：向用户群体一键发送更新信息与使用指导（仅口令验证后可见）
+// 4. 开发者专属隐藏后台：向用户群体一键发送更新信息与使用指导
 // ============================================================================
 void showDeveloperBroadcastConsole(
   BuildContext context,
@@ -1746,8 +2304,8 @@ void showDeveloperBroadcastConsole(
                                     controller: urlCtrl,
                                     decoration: InputDecoration(
                                       labelText: isEnglish
-                                          ? 'Custom APK Direct URL (Optional)'
-                                          : '外部 APK 下载直链（选填，留空走内置安装）',
+                                          ? 'Custom APK Direct URL'
+                                          : '外部 APK 下载直链',
                                       border: OutlineInputBorder(
                                         borderRadius: BorderRadius.circular(10),
                                       ),
@@ -1790,20 +2348,31 @@ void showDeveloperBroadcastConsole(
                             mainAxisAlignment: MainAxisAlignment.end,
                             children: [
                               OutlinedButton.icon(
-                                icon: const Icon(Icons.copy, size: 16),
+                                icon: const Icon(
+                                  Icons.table_chart_outlined,
+                                  size: 16,
+                                ),
                                 label: Text(
-                                  isEnglish ? 'Copy Sync JSON' : '复制云端广播码',
+                                  isEnglish
+                                      ? 'Load My UQ Courses'
+                                      : '载入开发者本人UQ课表',
                                 ),
                                 onPressed: () {
-                                  final code = courseSyncCenter
-                                      .exportToSyncJson();
-                                  Clipboard.setData(ClipboardData(text: code));
+                                  final parsed =
+                                      CourseSyncController.parseExcelTableText(
+                                        CourseSyncController
+                                            .uploadedExcelRawData,
+                                      );
+                                  courseSyncCenter.importCourses(
+                                    parsed,
+                                    replaceAll: true,
+                                  );
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
                                       content: Text(
                                         isEnglish
-                                            ? 'Broadcast JSON copied!'
-                                            : '包含最新广播的云端 JSON 已复制！',
+                                            ? 'Loaded UQ courses!'
+                                            : '已载入开发者专属 UQ 课表！',
                                       ),
                                     ),
                                   );
@@ -1909,7 +2478,7 @@ void showDeveloperBroadcastConsole(
 }
 
 // ============================================================================
-// 二维比例时间轴周课表组件（已移除左上角 7-22 数字，保持纯净图标）
+// 二维比例时间轴周课表组件
 // ============================================================================
 class ProportionalTimeGrid extends StatefulWidget {
   final List<int> visibleWeekdays;
@@ -2033,6 +2602,8 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
         ((nowMinutes - effectiveStartHour * 60) / 60.0) * widget.hourHeight;
     final nowTimeStr =
         '${_now.hour.toString().padLeft(2, '0')}:${_now.minute.toString().padLeft(2, '0')}';
+    final showHolidays =
+        globalPrefs.getBool('pref_show_calendar_holidays') ?? false;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2056,7 +2627,6 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                 height: headerHeight + totalGridHeight,
                 child: Column(
                   children: [
-                    // 左上角表头：移除多余的 7-22 数字，仅保留纯净时钟图标
                     Container(
                       width: timeAxisWidth,
                       height: headerHeight,
@@ -2160,7 +2730,12 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                             final isTodayCol =
                                 widget.highlightTodayColumn &&
                                 formatDateKey(colDate) == todayKey;
-                            final dateLabel = '${colDate.month}/${colDate.day}';
+                            final holidayStr = showHolidays
+                                ? getHolidayName(colDate, widget.isEnglish)
+                                : null;
+                            final dateLabel = holidayStr != null
+                                ? '${colDate.month}/${colDate.day} · $holidayStr'
+                                : '${colDate.month}/${colDate.day}';
 
                             return Container(
                               width: colWidth,
@@ -2226,14 +2801,22 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                                       ],
                                     ],
                                   ),
-                                  if (widget.highlightTodayColumn)
+                                  if (widget.highlightTodayColumn ||
+                                      holidayStr != null)
                                     Text(
                                       dateLabel,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        fontSize: 10,
-                                        color: isTodayCol
-                                            ? Colors.blueAccent
-                                            : Colors.grey,
+                                        fontSize: 9.5,
+                                        fontWeight: holidayStr != null
+                                            ? FontWeight.bold
+                                            : FontWeight.normal,
+                                        color: holidayStr != null
+                                            ? Colors.orange
+                                            : (isTodayCol
+                                                  ? Colors.blueAccent
+                                                  : Colors.grey),
                                       ),
                                     ),
                                 ],
@@ -2706,7 +3289,7 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
                       child: Row(
                         children: [
                           const Icon(
-                            Icons.check_circle_outline,
+                            Icons.info_outline,
                             color: Colors.blueAccent,
                             size: 20,
                           ),
@@ -2714,8 +3297,8 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
                           Expanded(
                             child: Text(
                               isEnglish
-                                  ? 'Detected: timetable-49898680.xls (9 UQ St Lucia activities).'
-                                  : '已识别内置课表: timetable-49898680.xls（共 9 节课程活动）。',
+                                  ? 'Reset to default sample timetable anytime.'
+                                  : '可随时恢复通用示例课表，或在下方粘贴你自己的教务 Excel 表。',
                               style: const TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
@@ -2726,7 +3309,7 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
                             onPressed: () {
                               final parsed =
                                   CourseSyncController.parseExcelTableText(
-                                    CourseSyncController.uploadedExcelRawData,
+                                    CourseSyncController.sampleExcelRawData,
                                   );
                               courseSyncCenter.importCourses(
                                 parsed,
@@ -2737,13 +3320,13 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
                                 SnackBar(
                                   content: Text(
                                     isEnglish
-                                        ? 'Successfully imported ${parsed.length} courses from timetable-49898680.xls!'
-                                        : '已成功从 timetable-49898680.xls 重新导入 ${parsed.length} 节课程！',
+                                        ? 'Loaded ${parsed.length} sample courses!'
+                                        : '已恢复 ${parsed.length} 节通用示例课程！',
                                   ),
                                 ),
                               );
                             },
-                            child: Text(isEnglish ? 'Reload .xls' : '一键重载此表'),
+                            child: Text(isEnglish ? 'Load Sample' : '恢复示例课表'),
                           ),
                         ],
                       ),
@@ -2751,8 +3334,8 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
                     const SizedBox(height: 12),
                     Text(
                       isEnglish
-                          ? 'Or copy & paste rows directly from any Excel (.xls/.xlsx) or CSV file below:'
-                          : '或者直接从任意 Excel (.xls/.xlsx) 全选复制行并粘贴到下方，系统将自动识别列字段：',
+                          ? 'Copy & paste rows directly from any Excel (.xls/.xlsx) or CSV file below:'
+                          : '直接从任意 Excel (.xls/.xlsx) 全选复制行并粘贴到下方，系统将自动识别列字段：',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                     const SizedBox(height: 8),
@@ -2861,8 +3444,8 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
                   children: [
                     Text(
                       isEnglish
-                          ? 'Generate a sync code on PC Web and paste it on Mobile App (or vice versa) to sync all courses, events & developer broadcasts:'
-                          : '在电脑网页端或手机端一键复制“同步码”，在另一端粘贴即可实现双端课表、日程与开发者广播秒级同步：',
+                          ? 'Generate a sync code on PC Web and paste it on Mobile App (or vice versa) to sync all courses & events:'
+                          : '在电脑网页端或手机端一键复制“同步码”，在另一端粘贴即可实现双端课表与日程秒级同步：',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                     const SizedBox(height: 12),
@@ -2966,7 +3549,7 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
 }
 
 // ============================================================================
-// MyApp: 启动即同步读取 globalPrefs（含用户自定义头像、昵称、ID 与隐藏开发者模式状态）
+// MyApp: 启动即同步读取 globalPrefs（新用户默认显示通用示例昵称与访客 ID）
 // ============================================================================
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
@@ -2994,7 +3577,6 @@ class _MyAppState extends State<MyApp> {
   late String _lastReadBroadcastId;
   late bool _isDeveloperModeUnlocked;
 
-  // 用户自定义头像与 ID 资料
   late String _userName;
   late String _userIdTag;
   late int _avatarIconIdx;
@@ -3055,8 +3637,10 @@ class _MyAppState extends State<MyApp> {
     _isDeveloperModeUnlocked =
         globalPrefs.getBool('pref_dev_mode_unlocked') ?? false;
 
-    _userName = globalPrefs.getString('pref_user_name') ?? 'UQ 圣卢西亚校区课表';
-    _userIdTag = globalPrefs.getString('pref_user_id_tag') ?? 'ID: 49898680';
+    // 首次使用、尚未注册的用户默认展示通用示例名称与访客 ID
+    _userName = globalPrefs.getString('pref_user_name') ?? '我的示例课表 (点击可修改)';
+    _userIdTag =
+        globalPrefs.getString('pref_user_id_tag') ?? 'ID: Guest_001 (示例学号)';
     _avatarIconIdx = globalPrefs.getInt('pref_avatar_icon_idx') ?? 0;
     _avatarColor = globalPrefs.getString('pref_avatar_color') ?? '#2979FF';
     _avatarCustomText = globalPrefs.getString('pref_avatar_custom_text') ?? '';
@@ -3347,7 +3931,6 @@ class _ResponsiveRootState extends State<ResponsiveRoot> {
   @override
   void initState() {
     super.initState();
-    // 启动通知横幅严格根据当前中英文语言展示对应语言标题
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.devMessageReceiveMode == 0 &&
           widget.hasUnreadBroadcast &&
@@ -3388,12 +3971,9 @@ class _ResponsiveRootState extends State<ResponsiveRoot> {
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
-    // 1. 通过浏览器 User-Agent 自动识别底层操作系统是否为 iOS 或 Android
     final isMobileOS =
         defaultTargetPlatform == TargetPlatform.iOS ||
         defaultTargetPlatform == TargetPlatform.android;
-
-    // 2. 判定规则：只要不是手机系统且窗口宽度 > 800（或大屏平板横屏宽度 > 1024），展示电脑端 UI；其余一律展示手机端 UI
     final bool showDesktopUI =
         (!isMobileOS && size.width > 800) || size.width > 1024;
 
@@ -4257,7 +4837,20 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 20),
+                    if (globalPrefs.getBool('pref_enable_desktop_widget') ??
+                        false)
+                      TodayDesktopWidgetCard(
+                        isEnglish: widget.isEnglish,
+                        onClose: () {
+                          setState(() {
+                            globalPrefs.setBool(
+                              'pref_enable_desktop_widget',
+                              false,
+                            );
+                          });
+                        },
+                      ),
+                    const SizedBox(height: 14),
                     Expanded(
                       child: Container(
                         clipBehavior: Clip.antiAlias,
@@ -4450,7 +5043,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                           InkWell(
                             onTap: () async {
                               final query = Uri.encodeComponent(
-                                '${selected.location} UQ St Lucia',
+                                selected.location,
                               );
                               final url = Uri.parse(
                                 'https://www.google.com/maps/search/?api=1&query=$query',
@@ -4907,7 +5500,7 @@ class _MobileMainScreenState extends State<MobileMainScreen> {
 }
 
 // ============================================================================
-// 2.5 Schedule 日程与待办事件页面
+// 2.5 Schedule 日程与待办事件页面（集成手机日历节假日展示）
 // ============================================================================
 class SchedulePage extends StatefulWidget {
   final bool isEnglish;
@@ -5107,6 +5700,11 @@ class _SchedulePageState extends State<SchedulePage> {
       14,
       (i) => todayBase.add(Duration(days: i - 2)),
     );
+    final showHolidays =
+        globalPrefs.getBool('pref_show_calendar_holidays') ?? false;
+    final selectedHoliday = showHolidays
+        ? getHolidayName(_selectedDate, widget.isEnglish)
+        : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -5166,6 +5764,9 @@ class _SchedulePageState extends State<SchedulePage> {
                     final hasEvents = courseSyncCenter.events.any(
                       (e) => e.dateStr == dKey,
                     );
+                    final isHoliday =
+                        showHolidays &&
+                        getHolidayName(dt, widget.isEnglish) != null;
 
                     return GestureDetector(
                       onTap: () => setState(() => _selectedDate = dt),
@@ -5177,6 +5778,9 @@ class _SchedulePageState extends State<SchedulePage> {
                               ? Colors.blueAccent
                               : Colors.grey.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(14),
+                          border: isHoliday && !isSelected
+                              ? Border.all(color: Colors.orange, width: 1.2)
+                              : null,
                         ),
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -5199,15 +5803,17 @@ class _SchedulePageState extends State<SchedulePage> {
                                 color: isSelected ? Colors.white : null,
                               ),
                             ),
-                            if (hasEvents)
+                            if (hasEvents || isHoliday)
                               Container(
                                 margin: const EdgeInsets.only(top: 4),
                                 width: 6,
                                 height: 6,
                                 decoration: BoxDecoration(
-                                  color: isSelected
-                                      ? Colors.amberAccent
-                                      : Colors.pinkAccent,
+                                  color: isHoliday
+                                      ? Colors.orangeAccent
+                                      : (isSelected
+                                            ? Colors.amberAccent
+                                            : Colors.pinkAccent),
                                   shape: BoxShape.circle,
                                 ),
                               ),
@@ -5223,6 +5829,41 @@ class _SchedulePageState extends State<SchedulePage> {
                 child: ListView(
                   padding: const EdgeInsets.all(16),
                   children: [
+                    // 若开启了「接入手机日历展示节假日」且当天是节假日，展示节假日横幅
+                    if (selectedHoliday != null)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 14),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.amber),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.celebration,
+                              color: Colors.orange,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                widget.isEnglish
+                                    ? 'Calendar Holiday: $selectedHoliday'
+                                    : '手机日历节假日：$selectedHoliday',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.orange,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -5386,9 +6027,7 @@ class _SchedulePageState extends State<SchedulePage> {
                                 color: Colors.redAccent,
                               ),
                               onPressed: () async {
-                                final query = Uri.encodeComponent(
-                                  '${c.location} UQ St Lucia',
-                                );
+                                final query = Uri.encodeComponent(c.location);
                                 final url = Uri.parse(
                                   'https://www.google.com/maps/search/?api=1&query=$query',
                                 );
@@ -5415,7 +6054,7 @@ class _SchedulePageState extends State<SchedulePage> {
 }
 
 // ============================================================================
-// 2.6 手机端多日网格课表页
+// 2.6 手机端多日网格课表页（支持在顶部展示可选桌面小组件）
 // ============================================================================
 class MobileTimetablePage extends StatefulWidget {
   final bool isEnglish;
@@ -5583,9 +6222,7 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
                 subtitle: Text(trLocation(course.location, widget.isEnglish)),
                 trailing: const Icon(Icons.open_in_new, size: 18),
                 onTap: () async {
-                  final query = Uri.encodeComponent(
-                    '${course.location} UQ St Lucia',
-                  );
+                  final query = Uri.encodeComponent(course.location);
                   final url = Uri.parse(
                     'https://www.google.com/maps/search/?api=1&query=$query',
                   );
@@ -5715,20 +6352,35 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
           ),
         ],
       ),
-      body: ProportionalTimeGrid(
-        visibleWeekdays: widget.visibleWeekdays,
-        columnsCount: widget.columnsCount,
-        visibleCourses: _visibleCourses,
-        currentWeek: _week,
-        isEnglish: widget.isEnglish,
-        isSimpleMode: widget.isSimpleMode,
-        showRichDetail: widget.columnsCount <= 3,
-        hourHeight: widget.hourHeight,
-        enableLiveTimeIndicator: widget.enableLiveTimeIndicator,
-        highlightTodayColumn: widget.highlightTodayColumn,
-        autoExpandTo24Hours: widget.autoExpandTo24Hours,
-        semesterStartMonday: widget.semesterStartMonday,
-        onCourseTap: _showCourseDetail,
+      body: Column(
+        children: [
+          if (globalPrefs.getBool('pref_enable_desktop_widget') ?? false)
+            TodayDesktopWidgetCard(
+              isEnglish: widget.isEnglish,
+              onClose: () {
+                setState(() {
+                  globalPrefs.setBool('pref_enable_desktop_widget', false);
+                });
+              },
+            ),
+          Expanded(
+            child: ProportionalTimeGrid(
+              visibleWeekdays: widget.visibleWeekdays,
+              columnsCount: widget.columnsCount,
+              visibleCourses: _visibleCourses,
+              currentWeek: _week,
+              isEnglish: widget.isEnglish,
+              isSimpleMode: widget.isSimpleMode,
+              showRichDetail: widget.columnsCount <= 3,
+              hourHeight: widget.hourHeight,
+              enableLiveTimeIndicator: widget.enableLiveTimeIndicator,
+              highlightTodayColumn: widget.highlightTodayColumn,
+              autoExpandTo24Hours: widget.autoExpandTo24Hours,
+              semesterStartMonday: widget.semesterStartMonday,
+              onCourseTap: _showCourseDetail,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -6256,7 +6908,7 @@ class _AddCoursePageState extends State<AddCoursePage> {
 }
 
 // ============================================================================
-// 4. 我的与设置（可编辑头像/ID + 连点 5 次版本号输入口令解锁开发者后台）
+// 4. 我的与设置（本地照片头像 + 不起眼离线/注册按钮 + 权限申请 + 节假日 + 桌面小组件）
 // ============================================================================
 class ProfilePage extends StatefulWidget {
   final bool isEnglish;
@@ -6470,7 +7122,10 @@ class _ProfilePageState extends State<ProfilePage> {
       currentAvatarIconIdx: widget.avatarIconIdx,
       currentAvatarColor: widget.avatarColor,
       currentAvatarText: widget.avatarCustomText,
-      onSave: widget.onUserProfileChanged,
+      onSave: (name, idTag, iconIdx, colorHex, customText) {
+        widget.onUserProfileChanged(name, idTag, iconIdx, colorHex, customText);
+        setState(() {});
+      },
     );
   }
 
@@ -6480,6 +7135,10 @@ class _ProfilePageState extends State<ProfilePage> {
       widget.semesterStartMonday,
       DateTime.now(),
     );
+    final savedPhotoBase64 = globalPrefs.getString('pref_avatar_base64') ?? '';
+    final registeredPhone =
+        globalPrefs.getString('pref_registered_phone') ?? '';
+
     const avatarIcons = [
       Icons.school,
       Icons.auto_awesome,
@@ -6496,7 +7155,6 @@ class _ProfilePageState extends State<ProfilePage> {
       body: ListView(
         padding: const EdgeInsets.symmetric(vertical: 16),
         children: [
-          // 可点击自由修改的头像与用户昵称/ID 区域
           Center(
             child: InkWell(
               borderRadius: BorderRadius.circular(50),
@@ -6507,7 +7165,12 @@ class _ProfilePageState extends State<ProfilePage> {
                   CircleAvatar(
                     radius: 40,
                     backgroundColor: parseHexColor(widget.avatarColor),
-                    child: widget.avatarCustomText.isNotEmpty
+                    backgroundImage: savedPhotoBase64.isNotEmpty
+                        ? MemoryImage(base64Decode(savedPhotoBase64))
+                        : null,
+                    child: savedPhotoBase64.isNotEmpty
+                        ? null
+                        : widget.avatarCustomText.isNotEmpty
                         ? Text(
                             widget.avatarCustomText.characters
                                 .take(2)
@@ -6534,7 +7197,7 @@ class _ProfilePageState extends State<ProfilePage> {
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(
-                      Icons.edit,
+                      Icons.photo_camera,
                       size: 14,
                       color: Colors.white,
                     ),
@@ -6587,15 +7250,14 @@ class _ProfilePageState extends State<ProfilePage> {
               ),
             ),
           ),
-          const SizedBox(height: 4),
-          // 连点 5 次版本号触发开发者口令验证
+          const SizedBox(height: 2),
           Center(
             child: GestureDetector(
               onTap: _handleVersionTap,
               child: Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
-                  vertical: 4,
+                  vertical: 2,
                 ),
                 child: Text(
                   'Version v${courseSyncCenter.installedVersion}${widget.isDeveloperModeUnlocked ? ' (Dev)' : ''}',
@@ -6604,7 +7266,44 @@ class _ProfilePageState extends State<ProfilePage> {
               ),
             ),
           ),
-          const SizedBox(height: 14),
+          // 不起眼的「离线使用 / 手机号注册」切换小按钮
+          Center(
+            child: TextButton.icon(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor: Colors.grey,
+              ),
+              icon: Icon(
+                registeredPhone.isEmpty
+                    ? Icons.cloud_off_outlined
+                    : Icons.verified_user_outlined,
+                size: 13,
+              ),
+              label: Text(
+                registeredPhone.isEmpty
+                    ? (widget.isEnglish
+                          ? 'Offline Mode · Tap for Phone Register'
+                          : '离线使用中 · 点击可切换手机号注册')
+                    : (widget.isEnglish
+                          ? 'Registered: $registeredPhone'
+                          : '已绑定手机：$registeredPhone'),
+                style: const TextStyle(fontSize: 11.5),
+              ),
+              onPressed: () {
+                showAccountModeDialog(
+                  context: context,
+                  isEnglish: widget.isEnglish,
+                  currentPhone: registeredPhone,
+                  onPhoneSaved: (phone) {
+                    setState(() {
+                      globalPrefs.setString('pref_registered_phone', phone);
+                    });
+                  },
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: ElevatedButton.icon(
@@ -6627,6 +7326,104 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
           ),
           const SizedBox(height: 16),
+          const Divider(),
+
+          // ==================================================================
+          // 系统权限、手机日历节假日与可选桌面小组件
+          // ==================================================================
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Text(
+              widget.isEnglish
+                  ? 'Permissions, Calendar Holidays & Widget'
+                  : '系统权限、手机日历节假日与桌面小组件',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: Colors.blueAccent,
+              ),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(
+              Icons.security_outlined,
+              color: Colors.blueAccent,
+            ),
+            title: Text(
+              widget.isEnglish
+                  ? 'App Permissions Manager'
+                  : '应用权限管理（日历/消息/存储/定位/联网）',
+            ),
+            subtitle: Text(
+              widget.isEnglish
+                  ? 'Grant calendar, notification, storage, location & network access'
+                  : '申请手机日历、消息通知、本地照片存储、定位与联网权限',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () =>
+                showPermissionsManagerDialog(context, widget.isEnglish),
+          ),
+          SwitchListTile(
+            secondary: const Icon(
+              Icons.celebration_outlined,
+              color: Colors.orange,
+            ),
+            title: Text(
+              widget.isEnglish
+                  ? 'Sync Phone Calendar & Show Holidays'
+                  : '接入手机日历展示节假日',
+            ),
+            subtitle: Text(
+              widget.isEnglish
+                  ? 'Display public holidays in Schedule and Timetable headers'
+                  : '授权接入手机日历，在日程与课表表头自动展示公共节假日',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            value: globalPrefs.getBool('pref_show_calendar_holidays') ?? false,
+            onChanged: (val) async {
+              if (val && !kIsWeb) {
+                await Permission.calendarFullAccess.request();
+              }
+              setState(() {
+                globalPrefs.setBool('pref_show_calendar_holidays', val);
+              });
+            },
+          ),
+          SwitchListTile(
+            secondary: const Icon(
+              Icons.widgets_outlined,
+              color: Colors.indigoAccent,
+            ),
+            title: Text(
+              widget.isEnglish
+                  ? 'Generate Optional Desktop / Home Widget'
+                  : '生成可选桌面小组件（今日课表速览）',
+            ),
+            subtitle: Text(
+              widget.isEnglish
+                  ? 'Pin a compact today-classes widget card for quick glance'
+                  : '开启并生成今日课程速览小组件，直观展示当日排课与教室',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            value: globalPrefs.getBool('pref_enable_desktop_widget') ?? false,
+            onChanged: (val) {
+              setState(() {
+                globalPrefs.setBool('pref_enable_desktop_widget', val);
+              });
+              if (val) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      widget.isEnglish
+                          ? 'Desktop Widget generated! Check the top of your Timetable.'
+                          : '桌面小组件已生成！返回「课表」页面顶部即可查看。',
+                    ),
+                  ),
+                );
+              }
+            },
+          ),
           const Divider(),
 
           // ==================================================================
@@ -6774,7 +7571,6 @@ class _ProfilePageState extends State<ProfilePage> {
             trailing: const Icon(Icons.chevron_right),
             onTap: () => showUserFeedbackDialog(context, widget.isEnglish),
           ),
-          // 仅在连点 5 次版本号并通过口令验证后，才显示开发者专属群发后台
           if (widget.isDeveloperModeUnlocked)
             ListTile(
               leading: const Icon(
@@ -6788,8 +7584,8 @@ class _ProfilePageState extends State<ProfilePage> {
               ),
               subtitle: Text(
                 widget.isEnglish
-                    ? 'Unlocked: Push updates & guides or lock console'
-                    : '开发者已解锁：一键推送更新与指导，或点击进入后锁定隐藏',
+                    ? 'Unlocked: Push updates & guides or load UQ courses'
+                    : '开发者已解锁：一键推送更新、载入本人UQ课表或锁定隐藏',
                 style: const TextStyle(
                   fontSize: 12,
                   color: Colors.deepPurpleAccent,
@@ -6919,8 +7715,8 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
             subtitle: Text(
               widget.isEnglish
-                  ? 'Highlight current weekday column and show exact dates (e.g. 10/15)'
-                  : '在星期表头下方显示具体月/日（如 10/15），并高亮标记今天所在列',
+                  ? 'Highlight current weekday column and show exact dates'
+                  : '在星期表头下方显示具体月/日，并高亮标记今天所在列',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             value: widget.highlightTodayColumn,
