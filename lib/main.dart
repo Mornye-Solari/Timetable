@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:timetable_app/src/rust/api/simple.dart';
 import 'package:timetable_app/src/rust/frb_generated.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -13,16 +16,338 @@ Future<void> main() async {
       debugPrint("Rust init error: $e");
     }
   }
+  await courseSyncCenter.initialize();
   runApp(const MyApp());
 }
 
-String trName(String name, bool isEn) =>
-    (isEn && name == '软件工程课') ? 'Software Engineering' : name;
-String trLocation(String loc, bool isEn) =>
-    (isEn && loc == '教学楼 A302') ? 'Building A302' : loc;
-String trTeacher(String t, bool isEn) => (isEn && t == '教授') ? 'Professor' : t;
-String trRemark(String r, bool isEn) =>
-    (isEn && r == '记得带电脑') ? 'Remember to bring laptop' : r;
+// ============================================================================
+// 全局双端同步与 Excel 自动识别解析引擎
+// ============================================================================
+class CourseSyncController extends ChangeNotifier {
+  List<Course> _courses = [];
+  List<Course> get courses => List.unmodifiable(_courses);
+
+  // 内置你上传的 timetable-49898680.xls 原始数据，支持一键解析与自动恢复
+  static const String uploadedExcelRawData = '''
+Subject Code\tDescription\tGroup\tActivity\tDay\tTime\tCampus\tLocation\tStaff\tDuration\tDates
+COMP1100_S2_2026_STLUCIA_62308_IN\tIntroduction to Software Innovation\tSTU01\t01\tWed\t09:00\tSTLUCIA\t11A-120/121 - ModWest\tIan Clough\t3 hrs\t14/10
+CSSE2310_S2_2026_STLUCIA_60944_IN\tComputer Systems Principles and Programming\tLEC01\t01_Recorded\tTue\t12:00\tSTLUCIA\tDelayed viewing (Clashable)\tPeter Sutton\t2 hrs\t13/10
+CSSE2310_S2_2026_STLUCIA_60944_IN\tComputer Systems Principles and Programming\tLEC02\t01_Recorded\tThu\t12:00\tSTLUCIA\tDelayed viewing (Clashable)\tPeter Sutton\t1 hr\t15/10
+CSSE2310_S2_2026_STLUCIA_60944_IN\tComputer Systems Principles and Programming\tPRA01\t05\tWed\t16:00\tSTLUCIA\t69-520 -  Building 69\t-\t2 hrs\t14/10
+ECON1010_S2_2026_STLUCIA_60713_IN\tIntroductory Microeconomics\tLEC01\t01_Recorded\tThu\t10:00\tSTLUCIA\tDelayed viewing (Clashable)\tTerence Yeo\t2 hrs\t15/10
+ECON1010_S2_2026_STLUCIA_60713_IN\tIntroductory Microeconomics\tTUT01\t11\tTue\t08:00\tSTLUCIA\t02-D114 - Duhig Tower\t-\t1 hr\t13/10
+INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tAPP01\t07\tTue\t16:00\tSTLUCIA\t47A-342 - Sir James Foots Building\t-\t1 hr\t13/10
+INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tLEC01\t01_Recorded\tWed\t12:00\tSTLUCIA\tDelayed viewing (Clashable)\tXue Li\t2 hrs\t14/10
+INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t08:00\tSTLUCIA\t50-N301 - Hawken Engineering Building\t-\t1 hr\t15/10
+''';
+
+  Future<void> initialize() async {
+    final parsedFromExcel = parseExcelTableText(uploadedExcelRawData);
+    _courses = List.from(parsedFromExcel);
+
+    if (!kIsWeb) {
+      try {
+        final Map<String, Course> merged = {for (final c in _courses) c.id: c};
+        for (int w = 1; w <= 20; w++) {
+          for (final c in getCoursesForWeek(week: w)) {
+            // 保留 Rust 侧新增的自定义课程
+            if (c.id != "1") {
+              merged[c.id] = c;
+            }
+          }
+        }
+        for (final c in _courses) {
+          addCourse(course: c);
+        }
+        _courses = merged.values.toList();
+      } catch (e) {
+        debugPrint("Sync with Rust skipped: $e");
+      }
+    }
+    notifyListeners();
+  }
+
+  void addOrUpdateCourse(Course course) {
+    final idx = _courses.indexWhere((c) => c.id == course.id);
+    if (idx != -1) {
+      _courses[idx] = course;
+    } else {
+      _courses.add(course);
+      if (!kIsWeb) {
+        try {
+          addCourse(course: course);
+        } catch (_) {}
+      }
+    }
+    notifyListeners();
+  }
+
+  void deleteCourseById(String id) {
+    _courses.removeWhere((c) => c.id == id);
+    notifyListeners();
+  }
+
+  void importCourses(List<Course> newCourses, {bool replaceAll = false}) {
+    if (replaceAll) {
+      _courses = List.from(newCourses);
+    } else {
+      final Map<String, Course> map = {for (final c in _courses) c.id: c};
+      for (final c in newCourses) {
+        map[c.id] = c;
+        if (!kIsWeb) {
+          try {
+            addCourse(course: c);
+          } catch (_) {}
+        }
+      }
+      _courses = map.values.toList();
+    }
+    notifyListeners();
+  }
+
+  // 生成用于双端快速同步的 JSON 串
+  String exportToSyncJson() {
+    final list = _courses
+        .map(
+          (c) => {
+            'id': c.id,
+            'name': c.name,
+            'color': c.color,
+            'credits': c.credits,
+            'startWeek': c.startWeek,
+            'endWeek': c.endWeek,
+            'weekday': c.weekday,
+            'totalSections': c.totalSections,
+            'hasBreak': c.hasBreak,
+            'startTime': c.startTime,
+            'endTime': c.endTime,
+            'location': c.location,
+            'teacher': c.teacher,
+            'remark': c.remark,
+            'enableReminder': c.enableReminder,
+            'reminderMinutes': c.reminderMinutes,
+            'reminderCount': c.reminderCount,
+          },
+        )
+        .toList();
+    return jsonEncode(list);
+  }
+
+  int importFromSyncJson(String jsonStr, {bool replaceAll = true}) {
+    final decoded = jsonDecode(jsonStr) as List<dynamic>;
+    final List<Course> result = [];
+    for (final item in decoded) {
+      final m = item as Map<String, dynamic>;
+      result.add(
+        Course(
+          id: m['id'].toString(),
+          name: m['name'].toString(),
+          color: m['color'].toString(),
+          credits: (m['credits'] as num).toDouble(),
+          startWeek: (m['startWeek'] as num).toInt(),
+          endWeek: (m['endWeek'] as num).toInt(),
+          weekday: (m['weekday'] as num).toInt(),
+          totalSections: (m['totalSections'] as num).toInt(),
+          hasBreak: m['hasBreak'] as bool,
+          startTime: m['startTime'].toString(),
+          endTime: m['endTime'].toString(),
+          location: m['location'].toString(),
+          teacher: m['teacher'].toString(),
+          remark: m['remark'].toString(),
+          enableReminder: m['enableReminder'] as bool,
+          reminderMinutes: (m['reminderMinutes'] as num).toInt(),
+          reminderCount: (m['reminderCount'] as num).toInt(),
+        ),
+      );
+    }
+    importCourses(result, replaceAll: replaceAll);
+    return result.length;
+  }
+
+  /// 智能解析 Excel 表格文本（支持 TSV / CSV / 教务系统导出格式）
+  static List<Course> parseExcelTableText(String rawText) {
+    final lines = rawText
+        .split(RegExp(r'\r?\n'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (lines.isEmpty) {
+      return [];
+    }
+
+    final Map<String, String> subjectColorMap = {};
+    const List<String> palette = [
+      "#3F51B5", // 靛蓝
+      "#009688", // 蓝绿
+      "#E91E63", // 玫红
+      "#FF9800", // 琥珀橙
+      "#9C27B0", // 紫罗兰
+      "#00BCD4", // 青色
+    ];
+    int colorIdx = 0;
+
+    final List<Course> parsed = [];
+    int startRow = 0;
+
+    // 跳过表头行
+    if (lines.first.toLowerCase().contains('subject code') ||
+        lines.first.toLowerCase().contains('description')) {
+      startRow = 1;
+    }
+
+    for (int i = startRow; i < lines.length; i++) {
+      final line = lines[i];
+      List<String> cols = line.contains('\t')
+          ? line.split('\t')
+          : line.split(',');
+      cols = cols.map((e) => e.trim()).toList();
+      if (cols.length < 6) {
+        continue;
+      }
+
+      // 对应列: Subject Code(0), Description(1), Group(2), Activity(3), Day(4), Time(5), Campus(6), Location(7), Staff(8), Duration(9), Dates(10)
+      final rawSubjectCode = cols[0];
+      final description = cols.length > 1 ? cols[1] : '';
+      final group = cols.length > 2 ? cols[2] : '';
+      final activity = cols.length > 3 ? cols[3] : '';
+      final dayStr = cols.length > 4 ? cols[4] : 'Mon';
+      final timeStr = cols.length > 5 ? cols[5] : '08:00';
+      final locationStr = cols.length > 7 ? cols[7] : 'TBA';
+      final staffStr = cols.length > 8 ? cols[8] : '-';
+      final durationStr = cols.length > 9 ? cols[9] : '1 hr';
+      final datesStr = cols.length > 10 ? cols[10] : '';
+
+      // 提取课程短代码，如 COMP1100_S2_2026... -> COMP1100
+      final shortCode = rawSubjectCode.split('_').first;
+      if (!subjectColorMap.containsKey(shortCode)) {
+        subjectColorMap[shortCode] = palette[colorIdx % palette.length];
+        colorIdx++;
+      }
+      final courseColor = subjectColorMap[shortCode]!;
+
+      // 解析星期
+      int weekday = _parseWeekday(dayStr);
+
+      // 解析持续小时数并推算结束时间
+      final durationMatch = RegExp(r'(\d+)').firstMatch(durationStr);
+      final int durationHours = durationMatch != null
+          ? int.parse(durationMatch.group(1)!)
+          : 1;
+      final String startTime = _normalizeTime(timeStr);
+      final String endTime = _addHoursToTime(startTime, durationHours);
+
+      // 解析教师姓名
+      final String teacher = (staffStr == '-' || staffStr.isEmpty)
+          ? 'TBA'
+          : staffStr;
+
+      // 组合课程名与备注
+      final String displayTitle = group.isNotEmpty
+          ? '$shortCode ($group)'
+          : shortCode;
+      final String remark = [
+        if (description.isNotEmpty) description,
+        if (activity.isNotEmpty) 'Act: $activity',
+        if (datesStr.isNotEmpty) 'Date: $datesStr',
+      ].join(' | ');
+
+      parsed.add(
+        Course(
+          id: 'excel_${shortCode}_${group}_${weekday}_$startTime',
+          name: displayTitle,
+          color: courseColor,
+          credits: 2.0,
+          startWeek: 1,
+          endWeek: 13,
+          weekday: weekday,
+          totalSections: durationHours,
+          hasBreak: false,
+          startTime: startTime,
+          endTime: endTime,
+          location: locationStr,
+          teacher: teacher,
+          remark: remark,
+          enableReminder: true,
+          reminderMinutes: 15,
+          reminderCount: 1,
+        ),
+      );
+    }
+    return parsed;
+  }
+
+  static int _parseWeekday(String d) {
+    final lower = d.toLowerCase();
+    if (lower.startsWith('mon') || lower.contains('一')) return 1;
+    if (lower.startsWith('tue') || lower.contains('二')) return 2;
+    if (lower.startsWith('wed') || lower.contains('三')) return 3;
+    if (lower.startsWith('thu') || lower.contains('四')) return 4;
+    if (lower.startsWith('fri') || lower.contains('五')) return 5;
+    if (lower.startsWith('sat') || lower.contains('六')) return 6;
+    if (lower.startsWith('sun') || lower.contains('日') || lower.contains('天')) {
+      return 7;
+    }
+    return 1;
+  }
+
+  static String _normalizeTime(String t) {
+    final parts = t.split(':');
+    if (parts.length >= 2) {
+      final h = int.tryParse(parts[0]) ?? 8;
+      final m = int.tryParse(parts[1]) ?? 0;
+      return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
+    }
+    return '08:00';
+  }
+
+  static String _addHoursToTime(String start, int hours) {
+    final parts = start.split(':');
+    final h = (int.tryParse(parts[0]) ?? 8) + hours;
+    final m = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
+  }
+}
+
+final CourseSyncController courseSyncCenter = CourseSyncController();
+
+// 多语言动态翻译映射
+String trName(String name, bool isEn) {
+  if (!isEn) {
+    if (name.startsWith('COMP1100')) {
+      return name.replaceFirst('COMP1100', 'COMP1100 软件创新导论');
+    }
+    if (name.startsWith('CSSE2310')) {
+      return name.replaceFirst('CSSE2310', 'CSSE2310 计算机系统原理');
+    }
+    if (name.startsWith('ECON1010')) {
+      return name.replaceFirst('ECON1010', 'ECON1010 微观经济学导论');
+    }
+    if (name.startsWith('INFS2200')) {
+      return name.replaceFirst('INFS2200', 'INFS2200 关系数据库系统');
+    }
+    return name;
+  }
+  if (name == '软件工程课') return 'Software Engineering';
+  if (name == '高级算法') return 'Advanced Algorithms';
+  return name;
+}
+
+String trLocation(String loc, bool isEn) {
+  if (!isEn && loc == 'Delayed viewing (Clashable)') {
+    return '录播回放 (允许冲突)';
+  }
+  if (isEn && loc == '教学楼 A302') return 'Building A302';
+  if (isEn && loc == '科研楼 B105') return 'Research Bldg B105';
+  return loc;
+}
+
+String trTeacher(String t, bool isEn) {
+  if (!isEn && t == 'TBA') return '待定 (TBA)';
+  if (isEn && t == '教授') return 'Professor';
+  return t;
+}
+
+String trRemark(String r, bool isEn) => r;
 
 String getWeekdayLabel(int weekday, bool isEnglish) {
   const zh = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
@@ -38,27 +363,328 @@ Color parseHexColor(String hexStr) {
   }
 }
 
-List<Course> globalMockCourses = [
-  Course(
-    id: "1",
-    name: "软件工程课",
-    color: "#3F51B5",
-    credits: 3.0,
-    startWeek: 1,
-    endWeek: 16,
-    weekday: 4,
-    totalSections: 2,
-    hasBreak: true,
-    startTime: "08:00",
-    endTime: "09:40",
-    location: "教学楼 A302",
-    teacher: "教授",
-    remark: "记得带电脑",
-    enableReminder: true,
-    reminderMinutes: 15,
-    reminderCount: 1,
-  ),
-];
+// ============================================================================
+// Excel 导入与双端同步弹窗（电脑端与手机端通用）
+// ============================================================================
+void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
+  final pasteCtrl = TextEditingController();
+  final syncCodeCtrl = TextEditingController();
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return DefaultTabController(
+        length: 2,
+        child: AlertDialog(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                isEnglish
+                    ? 'Excel Import & Cross-Device Sync'
+                    : 'Excel 智能导入与双端同步',
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TabBar(
+                labelColor: Colors.blueAccent,
+                unselectedLabelColor: Colors.grey,
+                tabs: [
+                  Tab(
+                    icon: const Icon(Icons.table_chart_outlined),
+                    text: isEnglish ? 'Excel Auto-Import' : 'Excel 表格导入',
+                  ),
+                  Tab(
+                    icon: const Icon(Icons.sync),
+                    text: isEnglish ? 'Dual-End Sync' : '双端数据互通',
+                  ),
+                ],
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 560,
+            height: 360,
+            child: TabBarView(
+              children: [
+                // Tab 1: Excel 自动识别导入
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.blueAccent.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.check_circle_outline,
+                            color: Colors.blueAccent,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              isEnglish
+                                  ? 'Detected: timetable-49898680.xls (9 UQ St Lucia activities).'
+                                  : '已识别内置课表: timetable-49898680.xls（共 9 节课程活动）。',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              final parsed =
+                                  CourseSyncController.parseExcelTableText(
+                                    CourseSyncController.uploadedExcelRawData,
+                                  );
+                              courseSyncCenter.importCourses(
+                                parsed,
+                                replaceAll: true,
+                              );
+                              Navigator.pop(context);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    isEnglish
+                                        ? 'Successfully imported ${parsed.length} courses from timetable-49898680.xls!'
+                                        : '已成功从 timetable-49898680.xls 重新导入 ${parsed.length} 节课程！',
+                                  ),
+                                ),
+                              );
+                            },
+                            child: Text(isEnglish ? 'Reload .xls' : '一键重载此表'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      isEnglish
+                          ? 'Or copy & paste rows directly from any Excel (.xls/.xlsx) or CSV file below:'
+                          : '或者直接从任意 Excel (.xls/.xlsx) 全选复制行并粘贴到下方，系统将自动识别列字段：',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: pasteCtrl,
+                        maxLines: null,
+                        expands: true,
+                        textAlignVertical: TextAlignVertical.top,
+                        decoration: InputDecoration(
+                          hintText: isEnglish
+                              ? 'Subject Code\tDescription\tGroup\tActivity\tDay\tTime\tCampus\tLocation...'
+                              : '粘贴 Excel 内容（自动识别 Subject Code / Day / Time / Location / Staff / Duration）...',
+                          hintStyle: const TextStyle(fontSize: 12),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        OutlinedButton(
+                          onPressed: () {
+                            final parsed =
+                                CourseSyncController.parseExcelTableText(
+                                  pasteCtrl.text,
+                                );
+                            if (parsed.isEmpty) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    isEnglish
+                                        ? 'No valid rows recognized'
+                                        : '未识别到有效课程行，请检查格式',
+                                  ),
+                                ),
+                              );
+                              return;
+                            }
+                            courseSyncCenter.importCourses(
+                              parsed,
+                              replaceAll: false,
+                            );
+                            Navigator.pop(context);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  isEnglish
+                                      ? 'Appended ${parsed.length} courses!'
+                                      : '已增量导入 ${parsed.length} 门课程！',
+                                ),
+                              ),
+                            );
+                          },
+                          child: Text(isEnglish ? 'Append' : '增量合并导入'),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blueAccent,
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () {
+                            final parsed =
+                                CourseSyncController.parseExcelTableText(
+                                  pasteCtrl.text,
+                                );
+                            if (parsed.isEmpty) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    isEnglish
+                                        ? 'No valid rows recognized'
+                                        : '未识别到有效课程行，请检查格式',
+                                  ),
+                                ),
+                              );
+                              return;
+                            }
+                            courseSyncCenter.importCourses(
+                              parsed,
+                              replaceAll: true,
+                            );
+                            Navigator.pop(context);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  isEnglish
+                                      ? 'Replaced with ${parsed.length} courses!'
+                                      : '已全新覆盖导入 ${parsed.length} 门课程！',
+                                ),
+                              ),
+                            );
+                          },
+                          child: Text(isEnglish ? 'Replace All' : '覆盖导入课表'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+
+                // Tab 2: 双端数据互通同步码
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isEnglish
+                          ? 'Generate a sync code on PC Web and paste it on Mobile App (or vice versa) to sync all courses instantly:'
+                          : '在电脑网页端或手机端一键复制“同步码”，在另一端粘贴即可实现双端课表数据秒级完整同步：',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.copy, size: 18),
+                        label: Text(
+                          isEnglish
+                              ? 'Copy Current Timetable Sync Code'
+                              : '一键复制当前端同步码',
+                        ),
+                        onPressed: () {
+                          final code = courseSyncCenter.exportToSyncJson();
+                          Clipboard.setData(ClipboardData(text: code));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                isEnglish
+                                    ? 'Sync code copied to clipboard!'
+                                    : '同步码已复制到剪贴板！去另一端粘贴即可同步。',
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: syncCodeCtrl,
+                        maxLines: null,
+                        expands: true,
+                        textAlignVertical: TextAlignVertical.top,
+                        decoration: InputDecoration(
+                          hintText: isEnglish
+                              ? 'Paste Sync Code (JSON) here...'
+                              : '在此处粘贴来自另一端的同步码...',
+                          hintStyle: const TextStyle(fontSize: 12),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                        ),
+                        icon: const Icon(
+                          Icons.cloud_download_outlined,
+                          size: 18,
+                        ),
+                        label: Text(isEnglish ? 'Sync Now' : '立即同步更新'),
+                        onPressed: () {
+                          try {
+                            final count = courseSyncCenter.importFromSyncJson(
+                              syncCodeCtrl.text.trim(),
+                            );
+                            Navigator.pop(context);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  isEnglish
+                                      ? 'Synced $count courses!'
+                                      : '双端同步成功！已更新 $count 节课程。',
+                                ),
+                              ),
+                            );
+                          } catch (_) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  isEnglish
+                                      ? 'Invalid Sync Code'
+                                      : '同步码格式有误，请重新复制',
+                                ),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(isEnglish ? 'Close' : '关闭'),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
 
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
@@ -70,19 +696,19 @@ class MyApp extends StatefulWidget {
 class _MyAppState extends State<MyApp> {
   ThemeMode _themeMode = ThemeMode.system;
   bool _isEnglish = false;
-
-  // 第 12 条：自定义显示的星期列表（默认周一至周日全显示）
+  bool _showNonCurrentWeek = false;
   List<int> _visibleWeekdays = [1, 2, 3, 4, 5, 6, 7];
-  // 第 13 条：同屏展示的列数（当列数少时，单列更宽，自动展示更多课程细节文字）
   int _columnsCount = 5;
 
   void _toggleTheme(ThemeMode mode) => setState(() => _themeMode = mode);
   void _toggleLanguage(bool isEnglish) =>
       setState(() => _isEnglish = isEnglish);
+  void _toggleShowNonCurrentWeek(bool val) =>
+      setState(() => _showNonCurrentWeek = val);
 
   void _updateVisibleWeekdays(List<int> days) {
     if (days.isEmpty) {
-      return; // 至少保留一天
+      return;
     }
     setState(() {
       _visibleWeekdays = List.from(days)..sort();
@@ -100,36 +726,43 @@ class _MyAppState extends State<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Timetable',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF3F51B5),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        brightness: Brightness.light,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF5C6BC0),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-        brightness: Brightness.dark,
-      ),
-      themeMode: _themeMode,
-      home: ResponsiveRoot(
-        isEnglish: _isEnglish,
-        onThemeChanged: _toggleTheme,
-        onLanguageChanged: _toggleLanguage,
-        currentThemeMode: _themeMode,
-        visibleWeekdays: _visibleWeekdays,
-        columnsCount: _columnsCount,
-        onVisibleWeekdaysChanged: _updateVisibleWeekdays,
-        onColumnsCountChanged: _updateColumnsCount,
-      ),
+    return ListenableBuilder(
+      listenable: courseSyncCenter,
+      builder: (context, _) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: 'Timetable',
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF3F51B5),
+              brightness: Brightness.light,
+            ),
+            useMaterial3: true,
+            brightness: Brightness.light,
+          ),
+          darkTheme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF5C6BC0),
+              brightness: Brightness.dark,
+            ),
+            useMaterial3: true,
+            brightness: Brightness.dark,
+          ),
+          themeMode: _themeMode,
+          home: ResponsiveRoot(
+            isEnglish: _isEnglish,
+            onThemeChanged: _toggleTheme,
+            onLanguageChanged: _toggleLanguage,
+            currentThemeMode: _themeMode,
+            showNonCurrentWeek: _showNonCurrentWeek,
+            onShowNonCurrentWeekChanged: _toggleShowNonCurrentWeek,
+            visibleWeekdays: _visibleWeekdays,
+            columnsCount: _columnsCount,
+            onVisibleWeekdaysChanged: _updateVisibleWeekdays,
+            onColumnsCountChanged: _updateColumnsCount,
+          ),
+        );
+      },
     );
   }
 }
@@ -139,6 +772,8 @@ class ResponsiveRoot extends StatelessWidget {
   final ValueChanged<ThemeMode> onThemeChanged;
   final ValueChanged<bool> onLanguageChanged;
   final ThemeMode currentThemeMode;
+  final bool showNonCurrentWeek;
+  final ValueChanged<bool> onShowNonCurrentWeekChanged;
   final List<int> visibleWeekdays;
   final int columnsCount;
   final ValueChanged<List<int>> onVisibleWeekdaysChanged;
@@ -150,6 +785,8 @@ class ResponsiveRoot extends StatelessWidget {
     required this.onThemeChanged,
     required this.onLanguageChanged,
     required this.currentThemeMode,
+    required this.showNonCurrentWeek,
+    required this.onShowNonCurrentWeekChanged,
     required this.visibleWeekdays,
     required this.columnsCount,
     required this.onVisibleWeekdaysChanged,
@@ -165,6 +802,8 @@ class ResponsiveRoot extends StatelessWidget {
         onThemeChanged: onThemeChanged,
         onLanguageChanged: onLanguageChanged,
         currentThemeMode: currentThemeMode,
+        showNonCurrentWeek: showNonCurrentWeek,
+        onShowNonCurrentWeekChanged: onShowNonCurrentWeekChanged,
         visibleWeekdays: visibleWeekdays,
         columnsCount: columnsCount,
         onVisibleWeekdaysChanged: onVisibleWeekdaysChanged,
@@ -176,6 +815,8 @@ class ResponsiveRoot extends StatelessWidget {
         onThemeChanged: onThemeChanged,
         onLanguageChanged: onLanguageChanged,
         currentThemeMode: currentThemeMode,
+        showNonCurrentWeek: showNonCurrentWeek,
+        onShowNonCurrentWeekChanged: onShowNonCurrentWeekChanged,
         visibleWeekdays: visibleWeekdays,
         columnsCount: columnsCount,
         onVisibleWeekdaysChanged: onVisibleWeekdaysChanged,
@@ -193,6 +834,8 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
   final ValueChanged<ThemeMode> onThemeChanged;
   final ValueChanged<bool> onLanguageChanged;
   final ThemeMode currentThemeMode;
+  final bool showNonCurrentWeek;
+  final ValueChanged<bool> onShowNonCurrentWeekChanged;
   final List<int> visibleWeekdays;
   final int columnsCount;
   final ValueChanged<List<int>> onVisibleWeekdaysChanged;
@@ -204,6 +847,8 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
     required this.onThemeChanged,
     required this.onLanguageChanged,
     required this.currentThemeMode,
+    required this.showNonCurrentWeek,
+    required this.onShowNonCurrentWeekChanged,
     required this.visibleWeekdays,
     required this.columnsCount,
     required this.onVisibleWeekdaysChanged,
@@ -216,53 +861,38 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
 
 class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
   String _viewMode = 'Week';
-  int _currentWeek = 7;
+  int _currentWeek = 11; // 对应 13/10 - 15/10 所在教学周
   Course? _selectedCourse;
-  List<Course> _allCourses = [];
 
-  @override
-  void initState() {
-    super.initState();
-    _fetchData();
-  }
+  List<Course> get _allCourses => courseSyncCenter.courses;
 
-  void _fetchData() {
-    setState(() {
-      if (kIsWeb) {
-        _allCourses = List.from(globalMockCourses);
-      } else {
-        try {
-          _allCourses = getCoursesForWeek(week: _currentWeek);
-        } catch (_) {
-          _allCourses = [];
-        }
-      }
-      _checkSelection();
-    });
-  }
+  bool _isCourseActiveInWeek(Course c, int week) =>
+      week >= c.startWeek && week <= c.endWeek;
 
-  List<Course> get _visibleCourses => _allCourses
-      .where((c) => _currentWeek >= c.startWeek && _currentWeek <= c.endWeek)
-      .toList();
-
-  void _checkSelection() {
-    final visible = _visibleCourses;
-    if (visible.isNotEmpty) {
-      if (_selectedCourse == null ||
-          !visible.any((c) => c.id == _selectedCourse!.id)) {
-        _selectedCourse = visible.first;
-      } else {
-        _selectedCourse = visible.firstWhere(
-          (c) => c.id == _selectedCourse!.id,
-        );
-      }
-    } else {
-      _selectedCourse = null;
+  List<Course> get _visibleCourses {
+    if (widget.showNonCurrentWeek) {
+      return _allCourses;
     }
+    return _allCourses
+        .where((c) => _isCourseActiveInWeek(c, _currentWeek))
+        .toList();
+  }
+
+  Course? get _effectiveSelectedCourse {
+    final visible = _visibleCourses;
+    if (visible.isEmpty) {
+      return null;
+    }
+    if (_selectedCourse != null &&
+        visible.any((c) => c.id == _selectedCourse!.id)) {
+      return visible.firstWhere((c) => c.id == _selectedCourse!.id);
+    }
+    return visible.first;
   }
 
   void _deleteSelectedCourse() {
-    if (_selectedCourse == null) {
+    final target = _effectiveSelectedCourse;
+    if (target == null) {
       return;
     }
     showDialog(
@@ -277,13 +907,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
           ),
           TextButton(
             onPressed: () {
-              setState(() {
-                _allCourses.removeWhere((c) => c.id == _selectedCourse!.id);
-                if (kIsWeb) {
-                  globalMockCourses = List.from(_allCourses);
-                }
-                _checkSelection();
-              });
+              courseSyncCenter.deleteCourseById(target.id);
               Navigator.pop(context);
             },
             child: Text(
@@ -297,30 +921,20 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
   }
 
   Future<void> _editSelectedCourse() async {
-    if (_selectedCourse == null) {
+    final target = _effectiveSelectedCourse;
+    if (target == null) {
       return;
     }
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => AddCoursePage(
-          isEnglish: widget.isEnglish,
-          courseToEdit: _selectedCourse,
-        ),
+        builder: (context) =>
+            AddCoursePage(isEnglish: widget.isEnglish, courseToEdit: target),
       ),
     );
     if (result != null && result is Course) {
-      setState(() {
-        final index = _allCourses.indexWhere((c) => c.id == result.id);
-        if (index != -1) {
-          _allCourses[index] = result;
-          _selectedCourse = result;
-        }
-        if (kIsWeb) {
-          globalMockCourses = List.from(_allCourses);
-        }
-        _checkSelection();
-      });
+      courseSyncCenter.addOrUpdateCourse(result);
+      setState(() => _selectedCourse = result);
     }
   }
 
@@ -330,6 +944,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
     final bgCol = isDark ? const Color(0xFF121212) : const Color(0xFFF8F9FA);
     final cardBg = isDark ? const Color(0xFF1E1E1E) : Colors.white;
     final borderCol = isDark ? Colors.white12 : Colors.black12;
+    final selected = _effectiveSelectedCourse;
 
     return Scaffold(
       backgroundColor: bgCol,
@@ -360,7 +975,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: 28),
                 _buildSidebarItem(
                   Icons.grid_view_rounded,
                   widget.isEnglish ? 'Timetable' : '课表视图',
@@ -371,8 +986,21 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                   widget.isEnglish ? 'Schedule' : '日程安排',
                   false,
                 ),
-                const Divider(height: 32),
-                // 第 12 条：电脑端快捷过滤显示的星期
+                const Divider(height: 28),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text(
+                    widget.isEnglish ? 'Show Non-Current Week' : '显示非本周课程',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  value: widget.showNonCurrentWeek,
+                  onChanged: widget.onShowNonCurrentWeekChanged,
+                ),
+                const SizedBox(height: 12),
                 Text(
                   widget.isEnglish ? 'Displayed Days' : '显示星期 (过滤无课日)',
                   style: const TextStyle(
@@ -381,7 +1009,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                     color: Colors.grey,
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 8),
                 Wrap(
                   spacing: 6,
                   runSpacing: 6,
@@ -407,8 +1035,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                     );
                   }),
                 ),
-                const SizedBox(height: 20),
-                // 第 13 条：控制同屏展示列数
+                const SizedBox(height: 16),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -556,10 +1183,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                             icon: const Icon(Icons.chevron_left),
                             onPressed: () {
                               if (_currentWeek > 1) {
-                                setState(() {
-                                  _currentWeek--;
-                                  _checkSelection();
-                                });
+                                setState(() => _currentWeek--);
                               }
                             },
                           ),
@@ -587,14 +1211,11 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                             icon: const Icon(Icons.chevron_right),
                             onPressed: () {
                               if (_currentWeek < 20) {
-                                setState(() {
-                                  _currentWeek++;
-                                  _checkSelection();
-                                });
+                                setState(() => _currentWeek++);
                               }
                             },
                           ),
-                          const SizedBox(width: 16),
+                          const SizedBox(width: 12),
                           ElevatedButton.icon(
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.blueAccent,
@@ -617,18 +1238,39 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                                 ),
                               );
                               if (result != null && result is Course) {
-                                setState(() {
-                                  _allCourses.add(result);
-                                  if (kIsWeb) {
-                                    globalMockCourses = List.from(_allCourses);
-                                  }
-                                  _checkSelection();
-                                });
+                                courseSyncCenter.addOrUpdateCourse(result);
+                                setState(() => _selectedCourse = result);
                               }
                             },
                             icon: const Icon(Icons.add, size: 18),
                             label: Text(
                               widget.isEnglish ? 'Add Course' : '添加课程',
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                            onPressed: () => showExcelImportAndSyncModal(
+                              context,
+                              widget.isEnglish,
+                            ),
+                            icon: const Icon(
+                              Icons.upload_file,
+                              size: 18,
+                              color: Colors.blueAccent,
+                            ),
+                            label: Text(
+                              widget.isEnglish
+                                  ? 'Excel Import / Sync'
+                                  : 'Excel 导入与同步',
                             ),
                           ),
                         ],
@@ -678,7 +1320,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                       child: _viewMode == 'Month'
                           ? _buildMonthView()
                           : _viewMode == 'Week'
-                          ? _buildWeekView()
+                          ? _buildWeekView(selected)
                           : _buildDayView(),
                     ),
                   ),
@@ -692,7 +1334,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
             child: Container(
               color: cardBg,
               padding: const EdgeInsets.all(24),
-              child: _selectedCourse == null
+              child: selected == null
                   ? Center(
                       child: Text(
                         widget.isEnglish ? 'Select a course' : '点击左侧课程查看详情',
@@ -745,68 +1387,85 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                               width: 12,
                               height: 12,
                               decoration: BoxDecoration(
-                                color: parseHexColor(_selectedCourse!.color),
+                                color: parseHexColor(selected.color),
                                 shape: BoxShape.circle,
                               ),
                             ),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                trName(_selectedCourse!.name, widget.isEnglish),
+                                trName(selected.name, widget.isEnglish),
                                 style: const TextStyle(
-                                  fontSize: 20,
+                                  fontSize: 18,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
                             ),
                           ],
                         ),
+                        if (!_isCourseActiveInWeek(selected, _currentWeek)) ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              widget.isEnglish
+                                  ? 'Non-Current Week Course'
+                                  : '非本周课程',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.orange,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 20),
                         _buildDetailRow(
                           Icons.calendar_today,
                           widget.isEnglish ? 'Day' : '星期',
-                          getWeekdayLabel(
-                            _selectedCourse!.weekday,
-                            widget.isEnglish,
-                          ),
+                          getWeekdayLabel(selected.weekday, widget.isEnglish),
                         ),
                         _buildDetailRow(
                           Icons.access_time,
                           widget.isEnglish ? 'Time' : '时间',
-                          '${_selectedCourse!.startTime} - ${_selectedCourse!.endTime}',
+                          '${selected.startTime} - ${selected.endTime}',
                         ),
                         _buildDetailRow(
                           Icons.star_border,
                           widget.isEnglish ? 'Credits' : '学分',
-                          '${_selectedCourse!.credits} Cr',
+                          '${selected.credits} Cr',
                         ),
                         _buildDetailRow(
                           Icons.person_outline,
                           widget.isEnglish ? 'Teacher' : '教师',
-                          trTeacher(_selectedCourse!.teacher, widget.isEnglish),
+                          trTeacher(selected.teacher, widget.isEnglish),
                         ),
                         _buildDetailRow(
                           Icons.date_range,
                           widget.isEnglish ? 'Weeks' : '周数',
                           widget.isEnglish
-                              ? 'Weeks ${_selectedCourse!.startWeek} - ${_selectedCourse!.endWeek}'
-                              : '第 ${_selectedCourse!.startWeek} - ${_selectedCourse!.endWeek} 周',
+                              ? 'Weeks ${selected.startWeek} - ${selected.endWeek}'
+                              : '第 ${selected.startWeek} - ${selected.endWeek} 周',
                         ),
-                        if (_selectedCourse!.remark.isNotEmpty) ...[
+                        if (selected.remark.isNotEmpty) ...[
                           _buildDetailRow(
                             Icons.notes,
-                            widget.isEnglish ? 'Remark' : '备注',
-                            trRemark(_selectedCourse!.remark, widget.isEnglish),
+                            widget.isEnglish ? 'Info' : '详情',
+                            trRemark(selected.remark, widget.isEnglish),
                           ),
                         ],
                         const SizedBox(height: 20),
                         InkWell(
                           onTap: () async {
                             final query = Uri.encodeComponent(
-                              trLocation(
-                                _selectedCourse!.location,
-                                widget.isEnglish,
-                              ),
+                              '${selected.location} UQ St Lucia',
                             );
                             final url = Uri.parse(
                               'https://www.google.com/maps/search/?api=1&query=$query',
@@ -842,7 +1501,7 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                                     children: [
                                       Text(
                                         widget.isEnglish
-                                            ? 'Location (Map)'
+                                            ? 'Location (Google Maps)'
                                             : '上课教室导航',
                                         style: const TextStyle(
                                           fontWeight: FontWeight.bold,
@@ -852,10 +1511,10 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                                       const SizedBox(height: 2),
                                       Text(
                                         trLocation(
-                                          _selectedCourse!.location,
+                                          selected.location,
                                           widget.isEnglish,
                                         ),
-                                        style: const TextStyle(fontSize: 14),
+                                        style: const TextStyle(fontSize: 13),
                                       ),
                                     ],
                                   ),
@@ -924,10 +1583,9 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
     ),
   );
 
-  Widget _buildWeekView() {
+  Widget _buildWeekView(Course? selected) {
     final visible = _visibleCourses;
     final days = widget.visibleWeekdays;
-    // 当同屏展示列数较少（<= 4 列）时，开启丰富信息模式，展示老师、学分与备注
     final showRichText = widget.columnsCount <= 4;
 
     return LayoutBuilder(
@@ -942,9 +1600,9 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
             height: constraints.maxHeight,
             child: Row(
               children: days.map((dayIndex) {
-                final dayCourses = visible
-                    .where((c) => c.weekday == dayIndex)
-                    .toList();
+                final dayCourses =
+                    visible.where((c) => c.weekday == dayIndex).toList()
+                      ..sort((a, b) => a.startTime.compareTo(b.startTime));
                 return Container(
                   width: colWidth - 8,
                   margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -982,86 +1640,106 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                         Expanded(
                           child: ListView(
                             children: dayCourses.map((c) {
-                              bool isSelected = _selectedCourse == c;
-                              final cColor = parseHexColor(c.color);
-                              return InkWell(
-                                onTap: () =>
-                                    setState(() => _selectedCourse = c),
-                                child: Container(
-                                  margin: const EdgeInsets.symmetric(
-                                    vertical: 4,
-                                  ),
-                                  padding: const EdgeInsets.all(10),
-                                  decoration: BoxDecoration(
-                                    color: isSelected
-                                        ? cColor.withValues(alpha: 0.28)
-                                        : cColor.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(
-                                      color: isSelected
-                                          ? cColor
-                                          : cColor.withValues(alpha: 0.3),
-                                      width: isSelected ? 2 : 1,
+                              bool isSelected = selected?.id == c.id;
+                              bool isCurrentWeek = _isCourseActiveInWeek(
+                                c,
+                                _currentWeek,
+                              );
+                              final cColor = isCurrentWeek
+                                  ? parseHexColor(c.color)
+                                  : Colors.grey;
+
+                              return Opacity(
+                                opacity: isCurrentWeek ? 1.0 : 0.55,
+                                child: InkWell(
+                                  onTap: () =>
+                                      setState(() => _selectedCourse = c),
+                                  child: Container(
+                                    margin: const EdgeInsets.symmetric(
+                                      vertical: 4,
                                     ),
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        trName(c.name, widget.isEnglish),
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 13,
-                                        ),
+                                    padding: const EdgeInsets.all(10),
+                                    decoration: BoxDecoration(
+                                      color: isSelected
+                                          ? cColor.withValues(alpha: 0.28)
+                                          : cColor.withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: isSelected
+                                            ? cColor
+                                            : cColor.withValues(alpha: 0.3),
+                                        width: isSelected ? 2 : 1,
                                       ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        '${c.startTime} - ${c.endTime}',
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.grey,
-                                        ),
-                                      ),
-                                      Text(
-                                        trLocation(
-                                          c.location,
-                                          widget.isEnglish,
-                                        ),
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.grey,
-                                        ),
-                                      ),
-                                      if (showRichText) ...[
-                                        const Divider(height: 10),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        if (!isCurrentWeek)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              bottom: 2,
+                                            ),
+                                            child: Text(
+                                              widget.isEnglish
+                                                  ? '[Inactive]'
+                                                  : '[非本周]',
+                                              style: const TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.orange,
+                                              ),
+                                            ),
+                                          ),
                                         Text(
-                                          '${trTeacher(c.teacher, widget.isEnglish)} · ${c.credits} Cr',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                        Text(
-                                          widget.isEnglish
-                                              ? 'Weeks ${c.startWeek}-${c.endWeek}'
-                                              : '第 ${c.startWeek}-${c.endWeek} 周',
+                                          trName(c.name, widget.isEnglish),
                                           style: const TextStyle(
-                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          '${c.startTime} - ${c.endTime}',
+                                          style: const TextStyle(
+                                            fontSize: 11,
                                             color: Colors.grey,
                                           ),
                                         ),
-                                        if (c.remark.isNotEmpty)
+                                        Text(
+                                          trLocation(
+                                            c.location,
+                                            widget.isEnglish,
+                                          ),
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.grey,
+                                          ),
+                                        ),
+                                        if (showRichText) ...[
+                                          const Divider(height: 10),
                                           Text(
-                                            trRemark(
-                                              c.remark,
-                                              widget.isEnglish,
-                                            ),
+                                            '${trTeacher(c.teacher, widget.isEnglish)} · ${c.credits} Cr',
                                             style: const TextStyle(
-                                              fontSize: 10,
-                                              fontStyle: FontStyle.italic,
-                                              color: Colors.blueAccent,
+                                              fontSize: 11,
                                             ),
                                           ),
+                                          if (c.remark.isNotEmpty)
+                                            Text(
+                                              trRemark(
+                                                c.remark,
+                                                widget.isEnglish,
+                                              ),
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 10,
+                                                color: Colors.blueAccent,
+                                              ),
+                                            ),
+                                        ],
                                       ],
-                                    ],
+                                    ),
                                   ),
                                 ),
                               );
@@ -1119,31 +1797,35 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
               const SizedBox(height: 4),
               Expanded(
                 child: ListView(
-                  children: dayCourses
-                      .map(
-                        (c) => Container(
-                          margin: const EdgeInsets.only(bottom: 2),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: parseHexColor(c.color)
-                                .withValues(alpha: 0.2),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(
-                            trName(c.name, widget.isEnglish),
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: parseHexColor(c.color),
-                              fontWeight: FontWeight.bold,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
+                  children: dayCourses.map((c) {
+                    bool isCurrentWeek = _isCourseActiveInWeek(c, _currentWeek);
+                    final cColor = isCurrentWeek
+                        ? parseHexColor(c.color)
+                        : Colors.grey;
+                    return Opacity(
+                      opacity: isCurrentWeek ? 1.0 : 0.5,
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 2,
                         ),
-                      )
-                      .toList(),
+                        decoration: BoxDecoration(
+                          color: cColor.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          trName(c.name, widget.isEnglish),
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: cColor,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    );
+                  }).toList(),
                 ),
               ),
             ],
@@ -1181,6 +1863,8 @@ class MobileMainScreen extends StatefulWidget {
   final ValueChanged<ThemeMode> onThemeChanged;
   final ValueChanged<bool> onLanguageChanged;
   final ThemeMode currentThemeMode;
+  final bool showNonCurrentWeek;
+  final ValueChanged<bool> onShowNonCurrentWeekChanged;
   final List<int> visibleWeekdays;
   final int columnsCount;
   final ValueChanged<List<int>> onVisibleWeekdaysChanged;
@@ -1192,6 +1876,8 @@ class MobileMainScreen extends StatefulWidget {
     required this.onThemeChanged,
     required this.onLanguageChanged,
     required this.currentThemeMode,
+    required this.showNonCurrentWeek,
+    required this.onShowNonCurrentWeekChanged,
     required this.visibleWeekdays,
     required this.columnsCount,
     required this.onVisibleWeekdaysChanged,
@@ -1214,6 +1900,7 @@ class _MobileMainScreenState extends State<MobileMainScreen> {
       SchedulePage(isEnglish: widget.isEnglish),
       MobileTimetablePage(
         isEnglish: widget.isEnglish,
+        showNonCurrentWeek: widget.showNonCurrentWeek,
         visibleWeekdays: widget.visibleWeekdays,
         columnsCount: widget.columnsCount,
       ),
@@ -1222,6 +1909,8 @@ class _MobileMainScreenState extends State<MobileMainScreen> {
         onThemeChanged: widget.onThemeChanged,
         onLanguageChanged: widget.onLanguageChanged,
         currentThemeMode: widget.currentThemeMode,
+        showNonCurrentWeek: widget.showNonCurrentWeek,
+        onShowNonCurrentWeekChanged: widget.onShowNonCurrentWeekChanged,
         visibleWeekdays: widget.visibleWeekdays,
         columnsCount: widget.columnsCount,
         onVisibleWeekdaysChanged: widget.onVisibleWeekdaysChanged,
@@ -1270,12 +1959,14 @@ class SchedulePage extends StatelessWidget {
 
 class MobileTimetablePage extends StatefulWidget {
   final bool isEnglish;
+  final bool showNonCurrentWeek;
   final List<int> visibleWeekdays;
   final int columnsCount;
 
   const MobileTimetablePage({
     super.key,
     required this.isEnglish,
+    required this.showNonCurrentWeek,
     required this.visibleWeekdays,
     required this.columnsCount,
   });
@@ -1285,32 +1976,19 @@ class MobileTimetablePage extends StatefulWidget {
 }
 
 class _MobileTimetablePageState extends State<MobileTimetablePage> {
-  int _week = 7;
-  List<Course> _allCourses = [];
+  int _week = 11;
 
-  @override
-  void initState() {
-    super.initState();
-    _fetchData();
+  List<Course> get _allCourses => courseSyncCenter.courses;
+
+  bool _isCourseActiveInWeek(Course c, int week) =>
+      week >= c.startWeek && week <= c.endWeek;
+
+  List<Course> get _visibleCourses {
+    if (widget.showNonCurrentWeek) {
+      return _allCourses;
+    }
+    return _allCourses.where((c) => _isCourseActiveInWeek(c, _week)).toList();
   }
-
-  void _fetchData() {
-    setState(() {
-      if (kIsWeb) {
-        _allCourses = List.from(globalMockCourses);
-      } else {
-        try {
-          _allCourses = getCoursesForWeek(week: _week);
-        } catch (_) {
-          _allCourses = [];
-        }
-      }
-    });
-  }
-
-  List<Course> get _visibleCourses => _allCourses
-      .where((c) => _week >= c.startWeek && _week <= c.endWeek)
-      .toList();
 
   Future<void> _editCourse(Course course) async {
     final result = await Navigator.push(
@@ -1321,19 +1999,12 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
       ),
     );
     if (result != null && result is Course) {
-      setState(() {
-        final index = _allCourses.indexWhere((c) => c.id == result.id);
-        if (index != -1) {
-          _allCourses[index] = result;
-        }
-        if (kIsWeb) {
-          globalMockCourses = List.from(_allCourses);
-        }
-      });
+      courseSyncCenter.addOrUpdateCourse(result);
     }
   }
 
   void _showCourseDetail(Course course) {
+    final isCurrent = _isCourseActiveInWeek(course, _week);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1354,7 +2025,7 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
                     child: Text(
                       trName(course.name, widget.isEnglish),
                       style: const TextStyle(
-                        fontSize: 22,
+                        fontSize: 20,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -1375,17 +2046,26 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
                       color: Colors.redAccent,
                     ),
                     onPressed: () {
-                      setState(() {
-                        _allCourses.removeWhere((c) => c.id == course.id);
-                        if (kIsWeb) {
-                          globalMockCourses = List.from(_allCourses);
-                        }
-                      });
+                      courseSyncCenter.deleteCourseById(course.id);
                       Navigator.pop(context);
                     },
                   ),
                 ],
               ),
+              if (!isCurrent)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    widget.isEnglish
+                        ? 'Non-Current Week (Active in Weeks ${course.startWeek}-${course.endWeek})'
+                        : '非本周课程（上课周数：第 ${course.startWeek}-${course.endWeek} 周）',
+                    style: const TextStyle(
+                      color: Colors.orange,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
               const Divider(),
               ListTile(
                 leading: const Icon(
@@ -1404,7 +2084,7 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
                 trailing: const Icon(Icons.open_in_new, size: 18),
                 onTap: () async {
                   final query = Uri.encodeComponent(
-                    trLocation(course.location, widget.isEnglish),
+                    '${course.location} UQ St Lucia',
                   );
                   final url = Uri.parse(
                     'https://www.google.com/maps/search/?api=1&query=$query',
@@ -1419,7 +2099,13 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
                 title: Text(widget.isEnglish ? 'Teacher' : '教师'),
                 subtitle: Text(trTeacher(course.teacher, widget.isEnglish)),
               ),
-              const SizedBox(height: 20),
+              if (course.remark.isNotEmpty)
+                ListTile(
+                  leading: const Icon(Icons.notes, color: Colors.purple),
+                  title: Text(widget.isEnglish ? 'Details' : '课程详情'),
+                  subtitle: Text(course.remark),
+                ),
+              const SizedBox(height: 16),
             ],
           ),
         );
@@ -1431,7 +2117,6 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
   Widget build(BuildContext context) {
     final visible = _visibleCourses;
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    // 第 13 条：当设置的展示列数 <= 3 列时，单列宽度充裕，直接展示任课老师、学分、周数与备注等详细文字信息
     final showRichDetail = widget.columnsCount <= 3;
 
     return Scaffold(
@@ -1464,7 +2149,14 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
         centerTitle: true,
         actions: [
           IconButton(
+            icon: const Icon(Icons.upload_file),
+            tooltip: widget.isEnglish ? 'Excel Import & Sync' : 'Excel 导入与同步',
+            onPressed: () =>
+                showExcelImportAndSyncModal(context, widget.isEnglish),
+          ),
+          IconButton(
             icon: const Icon(Icons.add),
+            tooltip: widget.isEnglish ? 'Add Course' : '添加课程',
             onPressed: () async {
               final result = await Navigator.push(
                 context,
@@ -1474,12 +2166,7 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
                 ),
               );
               if (result != null && result is Course) {
-                setState(() {
-                  _allCourses.add(result);
-                  if (kIsWeb) {
-                    globalMockCourses = List.from(_allCourses);
-                  }
-                });
+                courseSyncCenter.addOrUpdateCourse(result);
               }
             },
           ),
@@ -1494,9 +2181,9 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
               height: constraints.maxHeight,
               child: Row(
                 children: widget.visibleWeekdays.map((dayIndex) {
-                  final dayCourses = visible
-                      .where((c) => c.weekday == dayIndex)
-                      .toList();
+                  final dayCourses =
+                      visible.where((c) => c.weekday == dayIndex).toList()
+                        ..sort((a, b) => a.startTime.compareTo(b.startTime));
 
                   return Container(
                     width: colWidth - 8,
@@ -1533,95 +2220,130 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
                               : ListView(
                                   padding: const EdgeInsets.all(6),
                                   children: dayCourses.map((c) {
-                                    final cColor = parseHexColor(c.color);
-                                    return InkWell(
-                                      onTap: () => _showCourseDetail(c),
-                                      child: Container(
-                                        margin: const EdgeInsets.only(
-                                          bottom: 8,
-                                        ),
-                                        padding: const EdgeInsets.all(8),
-                                        decoration: BoxDecoration(
-                                          color: cColor.withValues(alpha: 0.15),
-                                          borderRadius: BorderRadius.circular(
-                                            10,
+                                    final isCurrentWeek = _isCourseActiveInWeek(
+                                      c,
+                                      _week,
+                                    );
+                                    final cColor = isCurrentWeek
+                                        ? parseHexColor(c.color)
+                                        : Colors.grey;
+
+                                    return Opacity(
+                                      opacity: isCurrentWeek ? 1.0 : 0.55,
+                                      child: InkWell(
+                                        onTap: () => _showCourseDetail(c),
+                                        child: Container(
+                                          margin: const EdgeInsets.only(
+                                            bottom: 8,
                                           ),
-                                          border: Border.all(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(
                                             color: cColor.withValues(
-                                              alpha: 0.35,
+                                              alpha: 0.15,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              10,
+                                            ),
+                                            border: Border.all(
+                                              color: cColor.withValues(
+                                                alpha: 0.35,
+                                              ),
                                             ),
                                           ),
-                                        ),
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              trName(c.name, widget.isEnglish),
-                                              style: TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: showRichDetail
-                                                    ? 14
-                                                    : 12,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              showRichDetail
-                                                  ? '${c.startTime} - ${c.endTime}'
-                                                  : c.startTime,
-                                              style: const TextStyle(
-                                                fontSize: 11,
-                                                color: Colors.grey,
-                                              ),
-                                            ),
-                                            Text(
-                                              trLocation(
-                                                c.location,
-                                                widget.isEnglish,
-                                              ),
-                                              style: const TextStyle(
-                                                fontSize: 11,
-                                                color: Colors.grey,
-                                              ),
-                                            ),
-                                            if (showRichDetail) ...[
-                                              const Divider(height: 10),
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              if (!isCurrentWeek)
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        bottom: 2,
+                                                      ),
+                                                  child: Text(
+                                                    widget.isEnglish
+                                                        ? '[Inactive]'
+                                                        : '[非本周]',
+                                                    style: const TextStyle(
+                                                      fontSize: 10,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                      color: Colors.orange,
+                                                    ),
+                                                  ),
+                                                ),
                                               Text(
-                                                '${trTeacher(c.teacher, widget.isEnglish)} · ${c.credits} Cr',
+                                                trName(
+                                                  c.name,
+                                                  widget.isEnglish,
+                                                ),
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: showRichDetail
+                                                      ? 13
+                                                      : 11,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                showRichDetail
+                                                    ? '${c.startTime} - ${c.endTime}'
+                                                    : c.startTime,
                                                 style: const TextStyle(
                                                   fontSize: 11,
-                                                  fontWeight: FontWeight.w500,
+                                                  color: Colors.grey,
                                                 ),
                                               ),
                                               Text(
-                                                widget.isEnglish
-                                                    ? 'Weeks ${c.startWeek}-${c.endWeek}'
-                                                    : '第 ${c.startWeek}-${c.endWeek} 周',
+                                                trLocation(
+                                                  c.location,
+                                                  widget.isEnglish,
+                                                ),
+                                                maxLines: showRichDetail
+                                                    ? 2
+                                                    : 1,
+                                                overflow: TextOverflow.ellipsis,
                                                 style: const TextStyle(
                                                   fontSize: 10,
                                                   color: Colors.grey,
                                                 ),
                                               ),
-                                              if (c.remark.isNotEmpty)
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                        top: 2,
-                                                      ),
-                                                  child: Text(
-                                                    trRemark(
-                                                      c.remark,
-                                                      widget.isEnglish,
-                                                    ),
-                                                    style: const TextStyle(
-                                                      fontSize: 10,
-                                                      color: Colors.blueAccent,
-                                                    ),
+                                              if (showRichDetail) ...[
+                                                const Divider(height: 10),
+                                                Text(
+                                                  trTeacher(
+                                                    c.teacher,
+                                                    widget.isEnglish,
+                                                  ),
+                                                  style: const TextStyle(
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.w500,
                                                   ),
                                                 ),
+                                                if (c.remark.isNotEmpty)
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.only(
+                                                          top: 2,
+                                                        ),
+                                                    child: Text(
+                                                      trRemark(
+                                                        c.remark,
+                                                        widget.isEnglish,
+                                                      ),
+                                                      maxLines: 2,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      style: const TextStyle(
+                                                        fontSize: 9,
+                                                        color:
+                                                            Colors.blueAccent,
+                                                      ),
+                                                    ),
+                                                  ),
+                                              ],
                                             ],
-                                          ],
+                                          ),
                                         ),
                                       ),
                                     );
@@ -1661,17 +2383,17 @@ class _AddCoursePageState extends State<AddCoursePage> {
   final _remarkController = TextEditingController();
 
   int _weekday = 1;
-  double _credits = 3.0;
+  double _credits = 2.0;
   int _startWeek = 1;
-  int _endWeek = 16;
+  int _endWeek = 13;
   String _startTime = "08:00";
-  String _endTime = "09:40";
+  String _endTime = "09:00";
   String _selectedColor = "#3F51B5";
 
   final List<String> _colors = [
     "#3F51B5",
+    "#009688",
     "#E91E63",
-    "#4CAF50",
     "#FF9800",
     "#9C27B0",
     "#00BCD4",
@@ -1724,10 +2446,10 @@ class _AddCoursePageState extends State<AddCoursePage> {
       startTime: _startTime,
       endTime: _endTime,
       location: _locationController.text.trim().isEmpty
-          ? (widget.isEnglish ? 'Building A302' : '教学楼 A302')
+          ? 'TBA'
           : _locationController.text.trim(),
       teacher: _teacherController.text.trim().isEmpty
-          ? (widget.isEnglish ? 'Professor' : '教授')
+          ? 'TBA'
           : _teacherController.text.trim(),
       remark: _remarkController.text.trim(),
       enableReminder: true,
@@ -1735,11 +2457,6 @@ class _AddCoursePageState extends State<AddCoursePage> {
       reminderCount: 1,
     );
 
-    if (!kIsWeb && widget.courseToEdit == null) {
-      try {
-        addCourse(course: newCourse);
-      } catch (_) {}
-    }
     Navigator.pop(context, newCourse);
   }
 
@@ -2168,13 +2885,15 @@ class _AddCoursePageState extends State<AddCoursePage> {
 }
 
 // ==========================================
-// 4. 我的与设置（含第 12、13 条课表显示定制）
+// 4. 我的与设置
 // ==========================================
 class ProfilePage extends StatelessWidget {
   final bool isEnglish;
   final ValueChanged<ThemeMode> onThemeChanged;
   final ValueChanged<bool> onLanguageChanged;
   final ThemeMode currentThemeMode;
+  final bool showNonCurrentWeek;
+  final ValueChanged<bool> onShowNonCurrentWeekChanged;
   final List<int> visibleWeekdays;
   final int columnsCount;
   final ValueChanged<List<int>> onVisibleWeekdaysChanged;
@@ -2186,6 +2905,8 @@ class ProfilePage extends StatelessWidget {
     required this.onThemeChanged,
     required this.onLanguageChanged,
     required this.currentThemeMode,
+    required this.showNonCurrentWeek,
+    required this.onShowNonCurrentWeekChanged,
     required this.visibleWeekdays,
     required this.columnsCount,
     required this.onVisibleWeekdaysChanged,
@@ -2207,11 +2928,32 @@ class ProfilePage extends StatelessWidget {
           const SizedBox(height: 10),
           Center(
             child: Text(
-              isEnglish ? 'Timetable User' : '课表用户',
+              isEnglish ? 'UQ St Lucia Timetable' : 'UQ 圣卢西亚校区课表',
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 20),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blueAccent,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              icon: const Icon(Icons.table_view),
+              label: Text(
+                isEnglish
+                    ? 'Excel Auto-Import & Dual Sync'
+                    : 'Excel 课表自动识别导入与双端同步',
+              ),
+              onPressed: () => showExcelImportAndSyncModal(context, isEnglish),
+            ),
+          ),
+          const SizedBox(height: 12),
           const Divider(),
           ListTile(
             leading: const Icon(Icons.language),
@@ -2256,7 +2998,21 @@ class ProfilePage extends StatelessWidget {
             ),
           ),
           const Divider(),
-          // 第 12 条：设置课表显示的星期
+          SwitchListTile(
+            secondary: const Icon(Icons.event_available_outlined),
+            title: Text(
+              isEnglish ? 'Show Non-Current Week Courses' : '显示非本周课程',
+            ),
+            subtitle: Text(
+              isEnglish
+                  ? 'Display courses from other weeks in a dimmed style'
+                  : '在当前周课表中以半透明样式展示其他周的课程',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            value: showNonCurrentWeek,
+            onChanged: onShowNonCurrentWeekChanged,
+          ),
+          const Divider(),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: Column(
@@ -2303,7 +3059,6 @@ class ProfilePage extends StatelessWidget {
             ),
           ),
           const Divider(),
-          // 第 13 条：设置课表同屏展示的列数
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: Column(
