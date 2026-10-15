@@ -283,11 +283,11 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
           category: 'update',
           content:
               '• 新增全量本地持久化存储，重启 App 完美记忆语言、主题、所有开关与课程修改。\n'
-              '• 支持自定义修改个人头像、昵称与 ID，连点 5 次版本号可验证口令开启开发者后台。\n'
+              '• 支持自定义修改个人头像、昵称与 ID。\n'
               '• 内置应用内 OTA 更新安装器与中英双语通知适配。',
           contentEn:
               '• Full local persistence via SharedPreferences: remembers language, theme, switches, and course edits across restarts.\n'
-              '• Customizable user avatar, nickname, and ID; tap Version 5 times to unlock the Developer Console.\n'
+              '• Customizable user avatar, nickname, and ID.\n'
               '• Built-in OTA package installer and full bilingual notification support.',
           dateStr: '2026-10-15',
           targetVersion: '1.2.0',
@@ -3387,8 +3387,17 @@ class _ResponsiveRootState extends State<ResponsiveRoot> {
 
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    if (kIsWeb && screenWidth > 900) {
+    final size = MediaQuery.of(context).size;
+    // 1. 通过浏览器 User-Agent 自动识别底层操作系统是否为 iOS 或 Android
+    final isMobileOS =
+        defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android;
+
+    // 2. 判定规则：只要不是手机系统且窗口宽度 > 800（或大屏平板横屏宽度 > 1024），展示电脑端 UI；其余一律展示手机端 UI
+    final bool showDesktopUI =
+        (!isMobileOS && size.width > 800) || size.width > 1024;
+
+    if (showDesktopUI) {
       return DesktopLuxuryWorkspace(
         isEnglish: widget.isEnglish,
         onThemeChanged: widget.onThemeChanged,
