@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -242,10 +243,11 @@ class CourseSyncController extends ChangeNotifier {
   List<DeveloperBroadcastMessage> _broadcasts = [];
   List<Map<String, String>> _localFeedbackHistory = [];
 
-  String _installedVersion = '1.2.0';
+  String get installedVersion => '1.2.0';
+
   String _latestRemoteVersion = '1.2.0';
   String _latestDownloadUrl =
-      'https://mornye-solari.github.io/Timetable/Timetable_v1.2.0.apk';
+      'https://mornye-solari.github.io/Timetable/Timetable_latest.apk';
 
   List<Course> get courses => List.unmodifiable(_courses);
   List<ScheduleEvent> get events => List.unmodifiable(_events);
@@ -253,10 +255,49 @@ class CourseSyncController extends ChangeNotifier {
       List.unmodifiable(_broadcasts);
   List<Map<String, String>> get localFeedbackHistory =>
       List.unmodifiable(_localFeedbackHistory);
-  String get installedVersion => _installedVersion;
   String get latestRemoteVersion => _latestRemoteVersion;
   String get latestDownloadUrl => _latestDownloadUrl;
-  bool get hasNewVersion => _installedVersion != _latestRemoteVersion;
+  bool get hasNewVersion => installedVersion != _latestRemoteVersion;
+
+  // 真正联网去你的 GitHub Pages 拉取最新版本号、更新日志与开发者广播
+  Future<bool> fetchRemoteUpdateConfig() async {
+    try {
+      // 加时间戳防止浏览器或手机缓存旧结果
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final url = Uri.parse(
+        'https://mornye-solari.github.io/Timetable/version.json?t=$ts',
+      );
+      final response = await http.get(url).timeout(const Duration(seconds: 6));
+
+      if (response.statusCode == 200) {
+        final data =
+            jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+        _latestRemoteVersion =
+            data['latestVersion']?.toString() ?? _latestRemoteVersion;
+        _latestDownloadUrl = data['apkUrl']?.toString() ?? _latestDownloadUrl;
+
+        // 如果云端配置了最新的更新说明或使用指导，自动同步进手机收件箱
+        if (data['broadcasts'] is List) {
+          final remoteList = (data['broadcasts'] as List)
+              .map(
+                (e) => DeveloperBroadcastMessage.fromJson(
+                  e as Map<String, dynamic>,
+                ),
+              )
+              .toList();
+          if (remoteList.isNotEmpty) {
+            _broadcasts = remoteList;
+            await _persistBroadcasts();
+          }
+        }
+        notifyListeners();
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Remote check failed: $e');
+    }
+    return false;
+  }
 
   // 供首次使用、尚未注册的用户展示的通用示例课表（不含开发者个人隐私信息）
   static const String sampleExcelRawData = '''
@@ -281,14 +322,6 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
 ''';
 
   Future<void> initialize() async {
-    _installedVersion =
-        globalPrefs.getString('pref_installed_version') ?? '1.2.0';
-    _latestRemoteVersion =
-        globalPrefs.getString('pref_latest_remote_version') ?? '1.2.0';
-    _latestDownloadUrl =
-        globalPrefs.getString('pref_latest_download_url') ??
-        'https://mornye-solari.github.io/Timetable/Timetable_v1.2.0.apk';
-
     final savedBroadcastsJson = globalPrefs.getString(_storageKeyBroadcasts);
     if (savedBroadcastsJson != null && savedBroadcastsJson.isNotEmpty) {
       try {
@@ -384,7 +417,6 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
   }
 
   Future<void> markInstalledVersionUpgraded(String newVer) async {
-    _installedVersion = newVer;
     await globalPrefs.setString('pref_installed_version', newVer);
     notifyListeners();
   }
@@ -1608,7 +1640,7 @@ Future<void> showCheckForUpdatesDialog(
     ),
   );
 
-  await Future.delayed(const Duration(milliseconds: 700));
+  await courseSyncCenter.fetchRemoteUpdateConfig();
   if (!context.mounted) {
     return;
   }

@@ -38,6 +38,7 @@ dependencies:
   shared_preferences: ^2.5.6
   image_picker: ^1.2.4
   permission_handler: ^13.0.2
+  http: ^1.6.0
 
 dev_dependencies:
   flutter_test:
