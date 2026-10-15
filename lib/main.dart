@@ -4,12 +4,21 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timetable_app/src/rust/api/simple.dart';
 import 'package:timetable_app/src/rust/frb_generated.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+late SharedPreferences globalPrefs;
+
+// 当前应用版本号与开发者默认配置
+const String kCurrentAppVersion = '1.1.0';
+const String kDeveloperEmail = 'developer@uq-timetable.app';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  globalPrefs = await SharedPreferences.getInstance();
+
   if (!kIsWeb) {
     try {
       await RustLib.init();
@@ -19,6 +28,50 @@ Future<void> main() async {
   }
   await courseSyncCenter.initialize();
   runApp(const MyApp());
+}
+
+// ============================================================================
+// 开发者广播消息与版本更新数据模型
+// ============================================================================
+class DeveloperBroadcastMessage {
+  final String id;
+  final String title;
+  final String category; // 'update' (更新信息) | 'guide' (使用指导) | 'notice' (公告)
+  final String content;
+  final String dateStr;
+  final String? targetVersion;
+  final String? downloadUrl;
+
+  DeveloperBroadcastMessage({
+    required this.id,
+    required this.title,
+    required this.category,
+    required this.content,
+    required this.dateStr,
+    this.targetVersion,
+    this.downloadUrl,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'title': title,
+    'category': category,
+    'content': content,
+    'dateStr': dateStr,
+    'targetVersion': targetVersion,
+    'downloadUrl': downloadUrl,
+  };
+
+  factory DeveloperBroadcastMessage.fromJson(Map<String, dynamic> m) =>
+      DeveloperBroadcastMessage(
+        id: m['id'].toString(),
+        title: m['title'].toString(),
+        category: m['category']?.toString() ?? 'guide',
+        content: m['content'].toString(),
+        dateStr: m['dateStr'].toString(),
+        targetVersion: m['targetVersion']?.toString(),
+        downloadUrl: m['downloadUrl']?.toString(),
+      );
 }
 
 // ============================================================================
@@ -133,14 +186,30 @@ class ScheduleEvent {
 }
 
 // ============================================================================
-// 全局双端同步与 Excel 自动识别解析引擎
+// 全局双端同步、本地持久化、开发者广播与更新中心
 // ============================================================================
 class CourseSyncController extends ChangeNotifier {
+  static const String _storageKeyData = 'saved_timetable_sync_json_v1';
+  static const String _storageKeyBroadcasts = 'saved_dev_broadcasts_v1';
+  static const String _storageKeyFeedbackList = 'saved_user_feedbacks_v1';
+
   List<Course> _courses = [];
   List<ScheduleEvent> _events = [];
+  List<DeveloperBroadcastMessage> _broadcasts = [];
+  List<Map<String, String>> _localFeedbackHistory = [];
+
+  String _latestRemoteVersion = '1.2.0';
+  String _latestDownloadUrl =
+      'https://github.com/Timetable-Release/releases/latest';
 
   List<Course> get courses => List.unmodifiable(_courses);
   List<ScheduleEvent> get events => List.unmodifiable(_events);
+  List<DeveloperBroadcastMessage> get broadcasts =>
+      List.unmodifiable(_broadcasts);
+  List<Map<String, String>> get localFeedbackHistory =>
+      List.unmodifiable(_localFeedbackHistory);
+  String get latestRemoteVersion => _latestRemoteVersion;
+  String get latestDownloadUrl => _latestDownloadUrl;
 
   static const String uploadedExcelRawData = '''
 Subject Code\tDescription\tGroup\tActivity\tDay\tTime\tCampus\tLocation\tStaff\tDuration\tDates
@@ -156,6 +225,72 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
 ''';
 
   Future<void> initialize() async {
+    // 1. 加载开发者广播消息与使用指导
+    final savedBroadcastsJson = globalPrefs.getString(_storageKeyBroadcasts);
+    if (savedBroadcastsJson != null && savedBroadcastsJson.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(savedBroadcastsJson) as List<dynamic>;
+        _broadcasts = decoded
+            .map(
+              (e) =>
+                  DeveloperBroadcastMessage.fromJson(e as Map<String, dynamic>),
+            )
+            .toList();
+      } catch (_) {}
+    }
+    if (_broadcasts.isEmpty) {
+      _broadcasts = [
+        DeveloperBroadcastMessage(
+          id: 'msg_init_guide',
+          title: '欢迎使用课表工作台 · 核心使用指导',
+          category: 'guide',
+          content:
+              '1. 【Excel 导入】点击顶栏上传图标，可直接粘贴教务系统导出的 Excel 行，自动识别科目、时长与教室。\n'
+              '2. 【双端同步】在电脑端复制同步码，粘贴至手机端即可秒级同步课表与待办。\n'
+              '3. 【视图定制】在「我的」设置中可自由过滤无课星期、调整同屏列数（≤3列自动展开完整详情）以及开启 24h 动态扩展。',
+          dateStr: '2026-10-15',
+        ),
+        DeveloperBroadcastMessage(
+          id: 'msg_update_120',
+          title: 'v1.2.0 开发者更新推送：全量本地记忆与在线更新系统',
+          category: 'update',
+          content:
+              '• 新增全量 SharedPreferences 本地持久化，重启 App 完美记忆语言、主题、所有开关与课程修改。\n'
+              '• 新增在线检查更新、用户反馈直达通道与开发者广播控制台。\n'
+              '• 常驻时间轴升级为 07:00–22:00，支持越界课程自动扩展至 24 小时。',
+          dateStr: '2026-10-15',
+          targetVersion: '1.2.0',
+          downloadUrl: 'https://github.com/Timetable-Release/releases/latest',
+        ),
+      ];
+      await _persistBroadcasts();
+    }
+
+    // 2. 加载本地反馈历史记录
+    final savedFeedbackJson = globalPrefs.getString(_storageKeyFeedbackList);
+    if (savedFeedbackJson != null && savedFeedbackJson.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(savedFeedbackJson) as List<dynamic>;
+        _localFeedbackHistory = decoded
+            .map((e) => Map<String, String>.from(e as Map))
+            .toList();
+      } catch (_) {}
+    }
+
+    // 3. 加载课程与日程数据
+    final savedJson = globalPrefs.getString(_storageKeyData);
+    if (savedJson != null && savedJson.isNotEmpty) {
+      try {
+        _loadFromJsonInternal(savedJson);
+        notifyListeners();
+        return;
+      } catch (e) {
+        debugPrint(
+          "Failed to parse saved courses, falling back to default: $e",
+        );
+      }
+    }
+
     final parsedFromExcel = parseExcelTableText(uploadedExcelRawData);
     _courses = List.from(parsedFromExcel);
 
@@ -186,128 +321,77 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
       ),
     ];
 
-    if (!kIsWeb) {
-      try {
-        final Map<String, Course> merged = {for (final c in _courses) c.id: c};
-        for (int w = 1; w <= 20; w++) {
-          for (final c in getCoursesForWeek(week: w)) {
-            if (c.id != "1") {
-              merged[c.id] = c;
-            }
-          }
-        }
-        for (final c in _courses) {
-          addCourse(course: c);
-        }
-        _courses = merged.values.toList();
-      } catch (e) {
-        debugPrint("Sync with Rust skipped: $e");
-      }
-    }
+    await _persistData();
     notifyListeners();
   }
 
-  void addOrUpdateCourse(Course course) {
-    final idx = _courses.indexWhere((c) => c.id == course.id);
-    if (idx != -1) {
-      _courses[idx] = course;
-    } else {
-      _courses.add(course);
-      if (!kIsWeb) {
-        try {
-          addCourse(course: course);
-        } catch (_) {}
-      }
-    }
-    notifyListeners();
-  }
-
-  void deleteCourseById(String id) {
-    _courses.removeWhere((c) => c.id == id);
-    notifyListeners();
-  }
-
-  void addOrUpdateEvent(ScheduleEvent event) {
-    final idx = _events.indexWhere((e) => e.id == event.id);
-    if (idx != -1) {
-      _events[idx] = event;
-    } else {
-      _events.add(event);
-    }
-    notifyListeners();
-  }
-
-  void toggleEventCompleted(String id) {
-    final idx = _events.indexWhere((e) => e.id == id);
-    if (idx != -1) {
-      _events[idx] = _events[idx].copyWith(
-        isCompleted: !_events[idx].isCompleted,
-      );
-      notifyListeners();
+  Future<void> _persistData() async {
+    try {
+      await globalPrefs.setString(_storageKeyData, exportToSyncJson());
+    } catch (e) {
+      debugPrint("Persist data error: $e");
     }
   }
 
-  void deleteEventById(String id) {
-    _events.removeWhere((e) => e.id == id);
-    notifyListeners();
-  }
-
-  void importCourses(List<Course> newCourses, {bool replaceAll = false}) {
-    if (replaceAll) {
-      _courses = List.from(newCourses);
-    } else {
-      final Map<String, Course> map = {for (final c in _courses) c.id: c};
-      for (final c in newCourses) {
-        map[c.id] = c;
-        if (!kIsWeb) {
-          try {
-            addCourse(course: c);
-          } catch (_) {}
-        }
-      }
-      _courses = map.values.toList();
+  Future<void> _persistBroadcasts() async {
+    try {
+      final list = _broadcasts.map((b) => b.toJson()).toList();
+      await globalPrefs.setString(_storageKeyBroadcasts, jsonEncode(list));
+    } catch (e) {
+      debugPrint("Persist broadcasts error: $e");
     }
+  }
+
+  // 开发者一键向用户群体发送更新信息或使用指导
+  Future<void> publishDeveloperBroadcast(DeveloperBroadcastMessage msg) async {
+    _broadcasts.insert(0, msg);
+    if (msg.targetVersion != null && msg.targetVersion!.isNotEmpty) {
+      _latestRemoteVersion = msg.targetVersion!;
+    }
+    if (msg.downloadUrl != null && msg.downloadUrl!.isNotEmpty) {
+      _latestDownloadUrl = msg.downloadUrl!;
+    }
+    await _persistBroadcasts();
     notifyListeners();
   }
 
-  String exportToSyncJson() {
-    final courseList = _courses
-        .map(
-          (c) => {
-            'id': c.id,
-            'name': c.name,
-            'color': c.color,
-            'credits': c.credits,
-            'startWeek': c.startWeek,
-            'endWeek': c.endWeek,
-            'weekday': c.weekday,
-            'totalSections': c.totalSections,
-            'hasBreak': c.hasBreak,
-            'startTime': c.startTime,
-            'endTime': c.endTime,
-            'location': c.location,
-            'teacher': c.teacher,
-            'remark': c.remark,
-            'enableReminder': c.enableReminder,
-            'reminderMinutes': c.reminderMinutes,
-            'reminderCount': c.reminderCount,
-          },
-        )
-        .toList();
-    final eventList = _events.map((e) => e.toJson()).toList();
-    return jsonEncode({'courses': courseList, 'events': eventList});
+  Future<void> deleteBroadcast(String id) async {
+    _broadcasts.removeWhere((b) => b.id == id);
+    await _persistBroadcasts();
+    notifyListeners();
   }
 
-  int importFromSyncJson(String jsonStr, {bool replaceAll = true}) {
+  // 记录用户提交的反馈建议
+  Future<void> submitUserFeedback({
+    required String category,
+    required String content,
+    required String contact,
+  }) async {
+    _localFeedbackHistory.insert(0, {
+      'category': category,
+      'content': content,
+      'contact': contact,
+      'time': formatDateKey(DateTime.now()),
+    });
+    await globalPrefs.setString(
+      _storageKeyFeedbackList,
+      jsonEncode(_localFeedbackHistory),
+    );
+    notifyListeners();
+  }
+
+  void _loadFromJsonInternal(String jsonStr) {
     final dynamic decoded = jsonDecode(jsonStr);
     List<dynamic> rawCourses = [];
     List<dynamic> rawEvents = [];
+    List<dynamic> rawBroadcasts = [];
 
     if (decoded is List) {
       rawCourses = decoded;
     } else if (decoded is Map<String, dynamic>) {
       rawCourses = (decoded['courses'] as List<dynamic>?) ?? [];
       rawEvents = (decoded['events'] as List<dynamic>?) ?? [];
+      rawBroadcasts = (decoded['broadcasts'] as List<dynamic>?) ?? [];
     }
 
     final List<Course> parsedCourses = [];
@@ -336,13 +420,120 @@ INFS2200_S2_2026_STLUCIA_60968_IN\tRelational Database Systems\tPRA01\t15\tThu\t
       );
     }
 
+    _courses = parsedCourses;
     if (rawEvents.isNotEmpty) {
       _events = rawEvents
           .map((e) => ScheduleEvent.fromJson(e as Map<String, dynamic>))
           .toList();
     }
-    importCourses(parsedCourses, replaceAll: replaceAll);
-    return parsedCourses.length;
+    if (rawBroadcasts.isNotEmpty) {
+      _broadcasts = rawBroadcasts
+          .map(
+            (b) =>
+                DeveloperBroadcastMessage.fromJson(b as Map<String, dynamic>),
+          )
+          .toList();
+      _persistBroadcasts();
+    }
+  }
+
+  void addOrUpdateCourse(Course course) {
+    final idx = _courses.indexWhere((c) => c.id == course.id);
+    if (idx != -1) {
+      _courses[idx] = course;
+    } else {
+      _courses.add(course);
+    }
+    _persistData();
+    notifyListeners();
+  }
+
+  void deleteCourseById(String id) {
+    _courses.removeWhere((c) => c.id == id);
+    _persistData();
+    notifyListeners();
+  }
+
+  void addOrUpdateEvent(ScheduleEvent event) {
+    final idx = _events.indexWhere((e) => e.id == event.id);
+    if (idx != -1) {
+      _events[idx] = event;
+    } else {
+      _events.add(event);
+    }
+    _persistData();
+    notifyListeners();
+  }
+
+  void toggleEventCompleted(String id) {
+    final idx = _events.indexWhere((e) => e.id == id);
+    if (idx != -1) {
+      _events[idx] = _events[idx].copyWith(
+        isCompleted: !_events[idx].isCompleted,
+      );
+      _persistData();
+      notifyListeners();
+    }
+  }
+
+  void deleteEventById(String id) {
+    _events.removeWhere((e) => e.id == id);
+    _persistData();
+    notifyListeners();
+  }
+
+  void importCourses(List<Course> newCourses, {bool replaceAll = false}) {
+    if (replaceAll) {
+      _courses = List.from(newCourses);
+    } else {
+      final Map<String, Course> map = {for (final c in _courses) c.id: c};
+      for (final c in newCourses) {
+        map[c.id] = c;
+      }
+      _courses = map.values.toList();
+    }
+    _persistData();
+    notifyListeners();
+  }
+
+  String exportToSyncJson() {
+    final courseList = _courses
+        .map(
+          (c) => {
+            'id': c.id,
+            'name': c.name,
+            'color': c.color,
+            'credits': c.credits,
+            'startWeek': c.startWeek,
+            'endWeek': c.endWeek,
+            'weekday': c.weekday,
+            'totalSections': c.totalSections,
+            'hasBreak': c.hasBreak,
+            'startTime': c.startTime,
+            'endTime': c.endTime,
+            'location': c.location,
+            'teacher': c.teacher,
+            'remark': c.remark,
+            'enableReminder': c.enableReminder,
+            'reminderMinutes': c.reminderMinutes,
+            'reminderCount': c.reminderCount,
+          },
+        )
+        .toList();
+    final eventList = _events.map((e) => e.toJson()).toList();
+    final broadcastList = _broadcasts.map((b) => b.toJson()).toList();
+    return jsonEncode({
+      'courses': courseList,
+      'events': eventList,
+      'broadcasts': broadcastList,
+    });
+  }
+
+  int importFromSyncJson(String jsonStr, {bool replaceAll = true}) {
+    _loadFromJsonInternal(jsonStr);
+    _persistData();
+    notifyListeners();
+    return _courses.length;
   }
 
   static List<Course> parseExcelTableText(String rawText) {
@@ -556,6 +747,742 @@ Color parseHexColor(String hexStr) {
 }
 
 // ============================================================================
+// 四大新功能弹窗交互：1. 检查更新  2. 用户反馈渠道  3. 开发者信息中心  4. 开发者一键广播后台
+// ============================================================================
+
+// 1. 联网检查更新弹窗
+Future<void> showCheckForUpdatesDialog(
+  BuildContext context,
+  bool isEnglish,
+) async {
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (context) => AlertDialog(
+      content: Row(
+        children: [
+          const CircularProgressIndicator(),
+          const SizedBox(width: 20),
+          Expanded(
+            child: Text(
+              isEnglish
+                  ? 'Connecting to update server...'
+                  : '正在连接开发者更新服务器检查新版本...',
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  await Future.delayed(const Duration(milliseconds: 900));
+  if (!context.mounted) {
+    return;
+  }
+  Navigator.pop(context);
+
+  final latestVer = courseSyncCenter.latestRemoteVersion;
+  final hasNew = latestVer != kCurrentAppVersion;
+  final latestUpdateMsg = courseSyncCenter.broadcasts
+      .where((b) => b.category == 'update')
+      .firstOrNull;
+
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Row(
+        children: [
+          Icon(
+            hasNew ? Icons.system_update_alt : Icons.verified_outlined,
+            color: hasNew ? Colors.blueAccent : Colors.green,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              hasNew
+                  ? (isEnglish
+                        ? 'New Update Available: v$latestVer'
+                        : '发现新版本：v$latestVer')
+                  : (isEnglish ? 'Up to Date' : '当前已是最新版本'),
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 440,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              isEnglish
+                  ? 'Installed Version: v$kCurrentAppVersion  →  Latest Online: v$latestVer'
+                  : '当前已安装版本：v$kCurrentAppVersion  →  云端最新版本：v$latestVer',
+              style: const TextStyle(
+                fontSize: 12,
+                color: Colors.grey,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const Divider(height: 20),
+            Text(
+              latestUpdateMsg != null
+                  ? latestUpdateMsg.title
+                  : (isEnglish ? 'Release Notes:' : '更新内容说明：'),
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              latestUpdateMsg != null
+                  ? latestUpdateMsg.content
+                  : (isEnglish
+                        ? '• Performance optimizations and bug fixes.'
+                        : '• 性能优化与细节体验提升。'),
+              style: const TextStyle(fontSize: 13, height: 1.5),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(isEnglish ? 'Later' : '稍后再说'),
+        ),
+        ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.blueAccent,
+            foregroundColor: Colors.white,
+          ),
+          icon: const Icon(Icons.download, size: 18),
+          label: Text(isEnglish ? 'Download Update' : '立即联网下载更新'),
+          onPressed: () async {
+            Navigator.pop(context);
+            final url = Uri.parse(courseSyncCenter.latestDownloadUrl);
+            if (await canLaunchUrl(url)) {
+              await launchUrl(url, mode: LaunchMode.externalApplication);
+            } else if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    isEnglish
+                        ? 'Update package URL copied to clipboard!'
+                        : '更新链接已复制：${courseSyncCenter.latestDownloadUrl}',
+                  ),
+                ),
+              );
+            }
+          },
+        ),
+      ],
+    ),
+  );
+}
+
+// 2. 用户反馈与改进提议渠道弹窗
+void showUserFeedbackDialog(BuildContext context, bool isEnglish) {
+  String selectedType = isEnglish ? 'Feature Suggestion' : '功能改进提议';
+  final types = isEnglish
+      ? ['Feature Suggestion', 'Bug Report', 'UI / UX Experience', 'Other']
+      : ['功能改进提议', 'Bug 异常反馈', 'UI 界面与体验优化', '其他建议'];
+  final contentCtrl = TextEditingController();
+  final contactCtrl = TextEditingController();
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setStateSB) {
+          return AlertDialog(
+            title: Row(
+              children: [
+                const Icon(
+                  Icons.rate_review_outlined,
+                  color: Colors.blueAccent,
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  isEnglish ? 'Send Feedback to Developer' : '向开发者发送改进提议与反馈',
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 480,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isEnglish ? 'Feedback Category:' : '选择反馈类型：',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: types.map((t) {
+                        final isSel = selectedType == t;
+                        return ChoiceChip(
+                          label: Text(t, style: const TextStyle(fontSize: 12)),
+                          selected: isSel,
+                          onSelected: (_) => setStateSB(() => selectedType = t),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: contentCtrl,
+                      maxLines: 4,
+                      decoration: InputDecoration(
+                        labelText: isEnglish
+                            ? 'Your suggestion or issue description...'
+                            : '请详细描述你的改进提议、新功能想法或遇到的问题...',
+                        alignLabelWithHint: true,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: contactCtrl,
+                      decoration: InputDecoration(
+                        prefixIcon: const Icon(Icons.alternate_email, size: 18),
+                        labelText: isEnglish
+                            ? 'Your Email / WeChat / Contact (Optional)'
+                            : '你的邮箱或联系方式（选填，方便开发者回复你）',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(isEnglish ? 'Cancel' : '取消'),
+              ),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.email_outlined, size: 16),
+                label: Text(isEnglish ? 'Send via Email' : '通过邮件直发开发者'),
+                onPressed: () async {
+                  final text = contentCtrl.text.trim();
+                  if (text.isEmpty) {
+                    return;
+                  }
+                  await courseSyncCenter.submitUserFeedback(
+                    category: selectedType,
+                    content: text,
+                    contact: contactCtrl.text.trim(),
+                  );
+                  final subject = Uri.encodeComponent(
+                    '[$selectedType] Timetable App Feedback',
+                  );
+                  final body = Uri.encodeComponent(
+                    'Category: $selectedType\nContact: ${contactCtrl.text.trim()}\n\nContent:\n$text',
+                  );
+                  final mailUrl = Uri.parse(
+                    'mailto:$kDeveloperEmail?subject=$subject&body=$body',
+                  );
+                  if (await canLaunchUrl(mailUrl)) {
+                    await launchUrl(mailUrl);
+                  }
+                  if (context.mounted) {
+                    Navigator.pop(context);
+                  }
+                },
+              ),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent,
+                  foregroundColor: Colors.white,
+                ),
+                icon: const Icon(Icons.send, size: 16),
+                label: Text(isEnglish ? 'Submit Online' : '一键联网提交给开发者'),
+                onPressed: () async {
+                  final text = contentCtrl.text.trim();
+                  if (text.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          isEnglish
+                              ? 'Please enter feedback content'
+                              : '请填写反馈内容后再提交',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+                  await courseSyncCenter.submitUserFeedback(
+                    category: selectedType,
+                    content: text,
+                    contact: contactCtrl.text.trim(),
+                  );
+                  if (context.mounted) {
+                    Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          isEnglish
+                              ? 'Thank you! Your feedback has been sent to the developer.'
+                              : '提交成功！感谢你的宝贵提议，开发者已收到你的反馈。',
+                        ),
+                      ),
+                    );
+                  }
+                },
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+// 3. 用户端查看「开发者消息与使用指导中心」弹窗
+void showDeveloperInboxDialog(
+  BuildContext context,
+  bool isEnglish,
+  int receiveMode,
+  VoidCallback onMarkAllRead,
+) {
+  onMarkAllRead();
+  showDialog(
+    context: context,
+    builder: (context) {
+      return ListenableBuilder(
+        listenable: courseSyncCenter,
+        builder: (context, _) {
+          final list = courseSyncCenter.broadcasts;
+          return AlertDialog(
+            title: Row(
+              children: [
+                const Icon(Icons.campaign_outlined, color: Colors.blueAccent),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    isEnglish
+                        ? 'Developer Updates & User Guides'
+                        : '开发者更新信息与使用指导',
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 520,
+              height: 380,
+              child: receiveMode == 2
+                  ? Center(
+                      child: Text(
+                        isEnglish
+                            ? 'You have chosen "Do Not Receive" in settings.\nSwitch to Receive mode to view developer guides & updates.'
+                            : '你当前在设置中选择了「不接收」开发者信息。\n如需查看使用指导与更新公告，请将接收模式切换为「接收」。',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.grey),
+                      ),
+                    )
+                  : list.isEmpty
+                  ? Center(
+                      child: Text(
+                        isEnglish ? 'No messages yet' : '暂无开发者消息',
+                        style: const TextStyle(color: Colors.grey),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: list.length,
+                      itemBuilder: (context, i) {
+                        final msg = list[i];
+                        final isUpdate = msg.category == 'update';
+                        final badgeColor = isUpdate
+                            ? Colors.blueAccent
+                            : Colors.teal;
+                        final badgeText = isUpdate
+                            ? (isEnglish ? 'UPDATE' : '版本更新')
+                            : (isEnglish ? 'GUIDE' : '使用指导');
+
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            side: BorderSide(
+                              color: badgeColor.withValues(alpha: 0.3),
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(14.0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: badgeColor.withValues(
+                                          alpha: 0.15,
+                                        ),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        badgeText,
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          color: badgeColor,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        msg.title,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      msg.dateStr,
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  msg.content,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    height: 1.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(isEnglish ? 'Close' : '关闭'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+// 4. 开发者专属：向用户群体一键发送更新信息与使用指导控制台
+void showDeveloperBroadcastConsole(
+  BuildContext context,
+  bool isEnglish,
+  ValueChanged<DeveloperBroadcastMessage> onBroadcastPublished,
+) {
+  final titleCtrl = TextEditingController();
+  final contentCtrl = TextEditingController();
+  final versionCtrl = TextEditingController(text: '1.2.1');
+  final urlCtrl = TextEditingController(
+    text: 'https://github.com/Timetable-Release/releases/latest',
+  );
+  String category = 'update';
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setStateSB) {
+          return DefaultTabController(
+            length: 2,
+            child: AlertDialog(
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.admin_panel_settings_outlined,
+                        color: Colors.deepPurpleAccent,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          isEnglish
+                              ? 'Developer Broadcast & Feedback Console'
+                              : '开发者广播推送与用户反馈管理台',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  TabBar(
+                    labelColor: Colors.deepPurpleAccent,
+                    unselectedLabelColor: Colors.grey,
+                    tabs: [
+                      Tab(
+                        text: isEnglish ? 'Push Update / Guide' : '一键群发更新与指导',
+                      ),
+                      Tab(text: isEnglish ? 'Received Feedbacks' : '查看收到的用户反馈'),
+                    ],
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 540,
+                height: 380,
+                child: TabBarView(
+                  children: [
+                    // Tab 1: 开发者一键发送广播
+                    SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                isEnglish ? 'Message Type: ' : '推送类型：',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              ChoiceChip(
+                                label: Text(
+                                  isEnglish ? 'Version Update' : '版本更新信息',
+                                ),
+                                selected: category == 'update',
+                                onSelected: (_) =>
+                                    setStateSB(() => category = 'update'),
+                              ),
+                              const SizedBox(width: 8),
+                              ChoiceChip(
+                                label: Text(
+                                  isEnglish ? 'User Guide' : '使用指导教学',
+                                ),
+                                selected: category == 'guide',
+                                onSelected: (_) =>
+                                    setStateSB(() => category = 'guide'),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: titleCtrl,
+                            decoration: InputDecoration(
+                              labelText: isEnglish
+                                  ? 'Broadcast Title (e.g. v1.2.1 Update / Quick Start Guide)'
+                                  : '广播标题（例如：v1.2.1 更新公告 / 课表导入使用指导）',
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          if (category == 'update') ...[
+                            Row(
+                              children: [
+                                Expanded(
+                                  flex: 1,
+                                  child: TextField(
+                                    controller: versionCtrl,
+                                    decoration: InputDecoration(
+                                      labelText: isEnglish
+                                          ? 'New Version'
+                                          : '最新版本号',
+                                      border: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  flex: 2,
+                                  child: TextField(
+                                    controller: urlCtrl,
+                                    decoration: InputDecoration(
+                                      labelText: isEnglish
+                                          ? 'APK / Web Update URL'
+                                          : '安装包下载直链 URL',
+                                      border: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                          ],
+                          TextField(
+                            controller: contentCtrl,
+                            maxLines: 4,
+                            decoration: InputDecoration(
+                              labelText: isEnglish
+                                  ? 'Enter update changelog or step-by-step usage guide...'
+                                  : '输入要向用户群体推送的更新说明或详细使用指导内容...',
+                              alignLabelWithHint: true,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              OutlinedButton.icon(
+                                icon: const Icon(Icons.copy, size: 16),
+                                label: Text(
+                                  isEnglish ? 'Copy Sync Payload' : '复制云端广播码',
+                                ),
+                                onPressed: () {
+                                  final code = courseSyncCenter
+                                      .exportToSyncJson();
+                                  Clipboard.setData(ClipboardData(text: code));
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        isEnglish
+                                            ? 'Broadcast JSON copied!'
+                                            : '包含最新广播的云端 JSON 已复制！',
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                              const SizedBox(width: 10),
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.deepPurpleAccent,
+                                  foregroundColor: Colors.white,
+                                ),
+                                icon: const Icon(
+                                  Icons.send_and_archive,
+                                  size: 16,
+                                ),
+                                label: Text(
+                                  isEnglish
+                                      ? 'Broadcast to All Users'
+                                      : '立即一键推送给用户群体',
+                                ),
+                                onPressed: () async {
+                                  if (titleCtrl.text.trim().isEmpty ||
+                                      contentCtrl.text.trim().isEmpty) {
+                                    return;
+                                  }
+                                  final msg = DeveloperBroadcastMessage(
+                                    id: 'broadcast_${DateTime.now().millisecondsSinceEpoch}',
+                                    title: titleCtrl.text.trim(),
+                                    category: category,
+                                    content: contentCtrl.text.trim(),
+                                    dateStr: formatDateKey(DateTime.now()),
+                                    targetVersion: category == 'update'
+                                        ? versionCtrl.text.trim()
+                                        : null,
+                                    downloadUrl: category == 'update'
+                                        ? urlCtrl.text.trim()
+                                        : null,
+                                  );
+                                  await courseSyncCenter
+                                      .publishDeveloperBroadcast(msg);
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                    onBroadcastPublished(msg);
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    // Tab 2: 查看用户提交的反馈列表
+                    courseSyncCenter.localFeedbackHistory.isEmpty
+                        ? Center(
+                            child: Text(
+                              isEnglish
+                                  ? 'No user feedback received yet.'
+                                  : '暂未收到用户提交的反馈记录',
+                              style: const TextStyle(color: Colors.grey),
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount:
+                                courseSyncCenter.localFeedbackHistory.length,
+                            itemBuilder: (context, index) {
+                              final item =
+                                  courseSyncCenter.localFeedbackHistory[index];
+                              return Card(
+                                margin: const EdgeInsets.only(bottom: 8),
+                                child: ListTile(
+                                  leading: const Icon(
+                                    Icons.feedback_outlined,
+                                    color: Colors.blueAccent,
+                                  ),
+                                  title: Text(
+                                    '${item['category']} (${item['time']})',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                    '${item['content']}\n${item['contact']!.isNotEmpty ? 'Contact: ${item['contact']}' : ''}',
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(isEnglish ? 'Close' : '关闭'),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
+// ============================================================================
 // 二维比例时间轴周课表组件（常驻 07:00-22:00，支持越界课程自动扩展至 00:00-24:00）
 // ============================================================================
 class ProportionalTimeGrid extends StatefulWidget {
@@ -597,8 +1524,8 @@ class ProportionalTimeGrid extends StatefulWidget {
 }
 
 class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
-  static const int residentStartHour = 7; // 常驻起点 07:00
-  static const int residentEndHour = 22; // 常驻终点 22:00
+  static const int residentStartHour = 7;
+  static const int residentEndHour = 22;
   static const double timeAxisWidth = 54.0;
   static const double headerHeight = 48.0;
 
@@ -641,7 +1568,6 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
   bool _isCourseActiveInWeek(Course c, int week) =>
       week >= c.startWeek && week <= c.endWeek;
 
-  // 判断是否存在早于 07:00 或晚于 22:00 的越界课程
   bool get _hasOutOfBoundsCourse {
     for (final c in widget.visibleCourses) {
       final sMin = timeStringToMinutes(c.startTime);
@@ -699,7 +1625,6 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 左侧固定时间标尺列
               SizedBox(
                 width: timeAxisWidth,
                 height: headerHeight + totalGridHeight,
@@ -803,7 +1728,6 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                   ],
                 ),
               ),
-              // 右侧可横向滑动区域
               Expanded(
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
@@ -812,7 +1736,6 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                     height: headerHeight + totalGridHeight,
                     child: Column(
                       children: [
-                        // 1. 星期表头行
                         Row(
                           children: widget.visibleWeekdays.map((dayIndex) {
                             final colDate = getDateForWeekAndDay(
@@ -904,7 +1827,6 @@ class _ProportionalTimeGridState extends State<ProportionalTimeGrid> {
                             );
                           }).toList(),
                         ),
-                        // 2. 二维时间轴绝对坐标网格
                         SizedBox(
                           width: totalRowWidth,
                           height: totalGridHeight,
@@ -1525,8 +2447,8 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
                   children: [
                     Text(
                       isEnglish
-                          ? 'Generate a sync code on PC Web and paste it on Mobile App (or vice versa) to sync all courses & schedule events instantly:'
-                          : '在电脑网页端或手机端一键复制“同步码”，在另一端粘贴即可实现双端课表与日程事件秒级同步：',
+                          ? 'Generate a sync code on PC Web and paste it on Mobile App (or vice versa) to sync all courses, events & developer broadcasts:'
+                          : '在电脑网页端或手机端一键复制“同步码”，在另一端粘贴即可实现双端课表、日程与开发者广播秒级同步：',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                     const SizedBox(height: 12),
@@ -1629,6 +2551,9 @@ void showExcelImportAndSyncModal(BuildContext context, bool isEnglish) {
   );
 }
 
+// ============================================================================
+// MyApp: 启动即同步读取 globalPrefs，零延迟、100% 记忆所有偏好与开发者消息接收策略
+// ============================================================================
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
 
@@ -1637,46 +2562,130 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  ThemeMode _themeMode = ThemeMode.system;
-  bool _isEnglish = false;
-  bool _isSimpleMode = false;
-  bool _showNonCurrentWeek = false;
-  List<int> _visibleWeekdays = [1, 2, 3, 4, 5, 6, 7];
-  int _columnsCount = 5;
-  double _hourHeight = 84.0;
+  late ThemeMode _themeMode;
+  late bool _isEnglish;
+  late bool _isSimpleMode;
+  late bool _showNonCurrentWeek;
+  late List<int> _visibleWeekdays;
+  late int _columnsCount;
+  late double _hourHeight;
 
-  bool _enableLiveTimeIndicator = true;
-  bool _highlightTodayColumn = true;
-  bool _autoCalculateWeek = true;
-  bool _autoExpandTo24Hours = true; // 新增：当有课程超出 07:00-22:00 时，自动扩展到 24 小时
-  DateTime _semesterStartMonday = DateTime(2026, 8, 3);
+  late bool _enableLiveTimeIndicator;
+  late bool _highlightTodayColumn;
+  late bool _autoCalculateWeek;
+  late bool _autoExpandTo24Hours;
+  late DateTime _semesterStartMonday;
 
-  void _toggleTheme(ThemeMode mode) => setState(() => _themeMode = mode);
-  void _toggleLanguage(bool isEnglish) =>
-      setState(() => _isEnglish = isEnglish);
-  void _toggleSimpleMode(bool val) => setState(() => _isSimpleMode = val);
-  void _toggleShowNonCurrentWeek(bool val) =>
-      setState(() => _showNonCurrentWeek = val);
-  void _updateHourHeight(double val) => setState(() => _hourHeight = val);
+  // 新增：开发者信息接收模式
+  // 0 = 接收并提醒 (Receive & Notify)
+  // 1 = 接收但不提醒 (Receive Silently)
+  // 2 = 不接收 (Do Not Receive)
+  late int _devMessageReceiveMode;
+  late String _lastReadBroadcastId;
 
-  void _toggleLiveTimeIndicator(bool val) =>
-      setState(() => _enableLiveTimeIndicator = val);
-  void _toggleHighlightTodayColumn(bool val) =>
-      setState(() => _highlightTodayColumn = val);
-  void _toggleAutoCalculateWeek(bool val) =>
-      setState(() => _autoCalculateWeek = val);
-  void _toggleAutoExpandTo24Hours(bool val) =>
-      setState(() => _autoExpandTo24Hours = val);
+  @override
+  void initState() {
+    super.initState();
+    _loadPreferencesSync();
+  }
+
+  void _loadPreferencesSync() {
+    final themeIdx = globalPrefs.getInt('pref_theme_mode') ?? 0;
+    _themeMode = ThemeMode.values[themeIdx.clamp(0, 2)];
+    _isEnglish = globalPrefs.getBool('pref_is_english') ?? false;
+    _isSimpleMode = globalPrefs.getBool('pref_is_simple_mode') ?? false;
+    _showNonCurrentWeek =
+        globalPrefs.getBool('pref_show_non_current_week') ?? false;
+
+    final daysStr = globalPrefs.getString('pref_visible_weekdays');
+    if (daysStr != null && daysStr.isNotEmpty) {
+      try {
+        _visibleWeekdays = (jsonDecode(daysStr) as List)
+            .map((e) => (e as num).toInt())
+            .toList();
+      } catch (_) {
+        _visibleWeekdays = [1, 2, 3, 4, 5, 6, 7];
+      }
+    } else {
+      _visibleWeekdays = [1, 2, 3, 4, 5, 6, 7];
+    }
+
+    _columnsCount = (globalPrefs.getInt('pref_columns_count') ?? 5).clamp(
+      1,
+      _visibleWeekdays.length,
+    );
+    _hourHeight = globalPrefs.getDouble('pref_hour_height') ?? 84.0;
+
+    _enableLiveTimeIndicator =
+        globalPrefs.getBool('pref_live_time_indicator') ?? true;
+    _highlightTodayColumn = globalPrefs.getBool('pref_highlight_today') ?? true;
+    _autoCalculateWeek = globalPrefs.getBool('pref_auto_calc_week') ?? true;
+    _autoExpandTo24Hours = globalPrefs.getBool('pref_auto_expand_24h') ?? true;
+
+    final startMonStr = globalPrefs.getString('pref_semester_start_mon');
+    if (startMonStr != null && startMonStr.isNotEmpty) {
+      _semesterStartMonday =
+          DateTime.tryParse(startMonStr) ?? DateTime(2026, 8, 3);
+    } else {
+      _semesterStartMonday = DateTime(2026, 8, 3);
+    }
+
+    _devMessageReceiveMode =
+        (globalPrefs.getInt('pref_dev_msg_receive_mode') ?? 0).clamp(0, 2);
+    _lastReadBroadcastId =
+        globalPrefs.getString('pref_last_read_broadcast_id') ?? '';
+  }
+
+  void _toggleTheme(ThemeMode mode) {
+    setState(() => _themeMode = mode);
+    globalPrefs.setInt('pref_theme_mode', mode.index);
+  }
+
+  void _toggleLanguage(bool val) {
+    setState(() => _isEnglish = val);
+    globalPrefs.setBool('pref_is_english', val);
+  }
+
+  void _toggleSimpleMode(bool val) {
+    setState(() => _isSimpleMode = val);
+    globalPrefs.setBool('pref_is_simple_mode', val);
+  }
+
+  void _toggleShowNonCurrentWeek(bool val) {
+    setState(() => _showNonCurrentWeek = val);
+    globalPrefs.setBool('pref_show_non_current_week', val);
+  }
+
+  void _updateHourHeight(double val) {
+    setState(() => _hourHeight = val);
+    globalPrefs.setDouble('pref_hour_height', val);
+  }
+
+  void _toggleLiveTimeIndicator(bool val) {
+    setState(() => _enableLiveTimeIndicator = val);
+    globalPrefs.setBool('pref_live_time_indicator', val);
+  }
+
+  void _toggleHighlightTodayColumn(bool val) {
+    setState(() => _highlightTodayColumn = val);
+    globalPrefs.setBool('pref_highlight_today', val);
+  }
+
+  void _toggleAutoCalculateWeek(bool val) {
+    setState(() => _autoCalculateWeek = val);
+    globalPrefs.setBool('pref_auto_calc_week', val);
+  }
+
+  void _toggleAutoExpandTo24Hours(bool val) {
+    setState(() => _autoExpandTo24Hours = val);
+    globalPrefs.setBool('pref_auto_expand_24h', val);
+  }
 
   void _updateSemesterStartMonday(DateTime dt) {
     final monday = dt.subtract(Duration(days: dt.weekday - 1));
-    setState(
-      () => _semesterStartMonday = DateTime(
-        monday.year,
-        monday.month,
-        monday.day,
-      ),
-    );
+    final clean = DateTime(monday.year, monday.month, monday.day);
+    setState(() => _semesterStartMonday = clean);
+    globalPrefs.setString('pref_semester_start_mon', clean.toIso8601String());
   }
 
   void _updateVisibleWeekdays(List<int> days) {
@@ -1689,12 +2698,39 @@ class _MyAppState extends State<MyApp> {
         _columnsCount = _visibleWeekdays.length;
       }
     });
+    globalPrefs.setString(
+      'pref_visible_weekdays',
+      jsonEncode(_visibleWeekdays),
+    );
+    globalPrefs.setInt('pref_columns_count', _columnsCount);
   }
 
   void _updateColumnsCount(int count) {
-    setState(() {
-      _columnsCount = count;
-    });
+    setState(() => _columnsCount = count);
+    globalPrefs.setInt('pref_columns_count', count);
+  }
+
+  void _updateDevMessageReceiveMode(int mode) {
+    setState(() => _devMessageReceiveMode = mode.clamp(0, 2));
+    globalPrefs.setInt('pref_dev_msg_receive_mode', _devMessageReceiveMode);
+  }
+
+  void _markAllBroadcastsRead() {
+    if (courseSyncCenter.broadcasts.isNotEmpty) {
+      final latestId = courseSyncCenter.broadcasts.first.id;
+      setState(() => _lastReadBroadcastId = latestId);
+      globalPrefs.setString('pref_last_read_broadcast_id', latestId);
+    }
+  }
+
+  bool get _hasUnreadBroadcast {
+    if (_devMessageReceiveMode == 2) {
+      return false; // 不接收模式
+    }
+    if (courseSyncCenter.broadcasts.isEmpty) {
+      return false;
+    }
+    return courseSyncCenter.broadcasts.first.id != _lastReadBroadcastId;
   }
 
   @override
@@ -1747,6 +2783,10 @@ class _MyAppState extends State<MyApp> {
             onAutoExpandTo24HoursChanged: _toggleAutoExpandTo24Hours,
             semesterStartMonday: _semesterStartMonday,
             onSemesterStartMondayChanged: _updateSemesterStartMonday,
+            devMessageReceiveMode: _devMessageReceiveMode,
+            onDevMessageReceiveModeChanged: _updateDevMessageReceiveMode,
+            hasUnreadBroadcast: _hasUnreadBroadcast,
+            onMarkAllBroadcastsRead: _markAllBroadcastsRead,
           ),
         );
       },
@@ -1754,7 +2794,7 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
-class ResponsiveRoot extends StatelessWidget {
+class ResponsiveRoot extends StatefulWidget {
   final bool isEnglish;
   final ValueChanged<ThemeMode> onThemeChanged;
   final ValueChanged<bool> onLanguageChanged;
@@ -1779,6 +2819,10 @@ class ResponsiveRoot extends StatelessWidget {
   final ValueChanged<bool> onAutoExpandTo24HoursChanged;
   final DateTime semesterStartMonday;
   final ValueChanged<DateTime> onSemesterStartMondayChanged;
+  final int devMessageReceiveMode;
+  final ValueChanged<int> onDevMessageReceiveModeChanged;
+  final bool hasUnreadBroadcast;
+  final VoidCallback onMarkAllBroadcastsRead;
 
   const ResponsiveRoot({
     super.key,
@@ -1806,71 +2850,128 @@ class ResponsiveRoot extends StatelessWidget {
     required this.onAutoExpandTo24HoursChanged,
     required this.semesterStartMonday,
     required this.onSemesterStartMondayChanged,
+    required this.devMessageReceiveMode,
+    required this.onDevMessageReceiveModeChanged,
+    required this.hasUnreadBroadcast,
+    required this.onMarkAllBroadcastsRead,
   });
+
+  @override
+  State<ResponsiveRoot> createState() => _ResponsiveRootState();
+}
+
+class _ResponsiveRootState extends State<ResponsiveRoot> {
+  @override
+  void initState() {
+    super.initState();
+    // 若用户设置为「0: 接收并提醒」且存在未读的开发者广播，在启动后主动弹出提醒横幅
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.devMessageReceiveMode == 0 &&
+          widget.hasUnreadBroadcast &&
+          courseSyncCenter.broadcasts.isNotEmpty) {
+        final latest = courseSyncCenter.broadcasts.first;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 5),
+            backgroundColor: Colors.blueAccent,
+            content: Text(
+              widget.isEnglish
+                  ? 'New Developer Message: ${latest.title}'
+                  : '收到开发者新消息：${latest.title}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            action: SnackBarAction(
+              label: widget.isEnglish ? 'View' : '立即查看',
+              textColor: Colors.amberAccent,
+              onPressed: () {
+                showDeveloperInboxDialog(
+                  context,
+                  widget.isEnglish,
+                  widget.devMessageReceiveMode,
+                  widget.onMarkAllBroadcastsRead,
+                );
+              },
+            ),
+          ),
+        );
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
     if (kIsWeb && screenWidth > 900) {
       return DesktopLuxuryWorkspace(
-        isEnglish: isEnglish,
-        onThemeChanged: onThemeChanged,
-        onLanguageChanged: onLanguageChanged,
-        currentThemeMode: currentThemeMode,
-        isSimpleMode: isSimpleMode,
-        onSimpleModeChanged: onSimpleModeChanged,
-        showNonCurrentWeek: showNonCurrentWeek,
-        onShowNonCurrentWeekChanged: onShowNonCurrentWeekChanged,
-        visibleWeekdays: visibleWeekdays,
-        columnsCount: columnsCount,
-        onVisibleWeekdaysChanged: onVisibleWeekdaysChanged,
-        onColumnsCountChanged: onColumnsCountChanged,
-        hourHeight: hourHeight,
-        onHourHeightChanged: onHourHeightChanged,
-        enableLiveTimeIndicator: enableLiveTimeIndicator,
-        onLiveTimeIndicatorChanged: onLiveTimeIndicatorChanged,
-        highlightTodayColumn: highlightTodayColumn,
-        onHighlightTodayColumnChanged: onHighlightTodayColumnChanged,
-        autoCalculateWeek: autoCalculateWeek,
-        onAutoCalculateWeekChanged: onAutoCalculateWeekChanged,
-        autoExpandTo24Hours: autoExpandTo24Hours,
-        onAutoExpandTo24HoursChanged: onAutoExpandTo24HoursChanged,
-        semesterStartMonday: semesterStartMonday,
-        onSemesterStartMondayChanged: onSemesterStartMondayChanged,
+        isEnglish: widget.isEnglish,
+        onThemeChanged: widget.onThemeChanged,
+        onLanguageChanged: widget.onLanguageChanged,
+        currentThemeMode: widget.currentThemeMode,
+        isSimpleMode: widget.isSimpleMode,
+        onSimpleModeChanged: widget.onSimpleModeChanged,
+        showNonCurrentWeek: widget.showNonCurrentWeek,
+        onShowNonCurrentWeekChanged: widget.onShowNonCurrentWeekChanged,
+        visibleWeekdays: widget.visibleWeekdays,
+        columnsCount: widget.columnsCount,
+        onVisibleWeekdaysChanged: widget.onVisibleWeekdaysChanged,
+        onColumnsCountChanged: widget.onColumnsCountChanged,
+        hourHeight: widget.hourHeight,
+        onHourHeightChanged: widget.onHourHeightChanged,
+        enableLiveTimeIndicator: widget.enableLiveTimeIndicator,
+        onLiveTimeIndicatorChanged: widget.onLiveTimeIndicatorChanged,
+        highlightTodayColumn: widget.highlightTodayColumn,
+        onHighlightTodayColumnChanged: widget.onHighlightTodayColumnChanged,
+        autoCalculateWeek: widget.autoCalculateWeek,
+        onAutoCalculateWeekChanged: widget.onAutoCalculateWeekChanged,
+        autoExpandTo24Hours: widget.autoExpandTo24Hours,
+        onAutoExpandTo24HoursChanged: widget.onAutoExpandTo24HoursChanged,
+        semesterStartMonday: widget.semesterStartMonday,
+        onSemesterStartMondayChanged: widget.onSemesterStartMondayChanged,
+        devMessageReceiveMode: widget.devMessageReceiveMode,
+        onDevMessageReceiveModeChanged: widget.onDevMessageReceiveModeChanged,
+        hasUnreadBroadcast: widget.hasUnreadBroadcast,
+        onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
       );
     } else {
       return MobileMainScreen(
-        isEnglish: isEnglish,
-        onThemeChanged: onThemeChanged,
-        onLanguageChanged: onLanguageChanged,
-        currentThemeMode: currentThemeMode,
-        isSimpleMode: isSimpleMode,
-        onSimpleModeChanged: onSimpleModeChanged,
-        showNonCurrentWeek: showNonCurrentWeek,
-        onShowNonCurrentWeekChanged: onShowNonCurrentWeekChanged,
-        visibleWeekdays: visibleWeekdays,
-        columnsCount: columnsCount,
-        onVisibleWeekdaysChanged: onVisibleWeekdaysChanged,
-        onColumnsCountChanged: onColumnsCountChanged,
-        hourHeight: hourHeight,
-        onHourHeightChanged: onHourHeightChanged,
-        enableLiveTimeIndicator: enableLiveTimeIndicator,
-        onLiveTimeIndicatorChanged: onLiveTimeIndicatorChanged,
-        highlightTodayColumn: highlightTodayColumn,
-        onHighlightTodayColumnChanged: onHighlightTodayColumnChanged,
-        autoCalculateWeek: autoCalculateWeek,
-        onAutoCalculateWeekChanged: onAutoCalculateWeekChanged,
-        autoExpandTo24Hours: autoExpandTo24Hours,
-        onAutoExpandTo24HoursChanged: onAutoExpandTo24HoursChanged,
-        semesterStartMonday: semesterStartMonday,
-        onSemesterStartMondayChanged: onSemesterStartMondayChanged,
+        isEnglish: widget.isEnglish,
+        onThemeChanged: widget.onThemeChanged,
+        onLanguageChanged: widget.onLanguageChanged,
+        currentThemeMode: widget.currentThemeMode,
+        isSimpleMode: widget.isSimpleMode,
+        onSimpleModeChanged: widget.onSimpleModeChanged,
+        showNonCurrentWeek: widget.showNonCurrentWeek,
+        onShowNonCurrentWeekChanged: widget.onShowNonCurrentWeekChanged,
+        visibleWeekdays: widget.visibleWeekdays,
+        columnsCount: widget.columnsCount,
+        onVisibleWeekdaysChanged: widget.onVisibleWeekdaysChanged,
+        onColumnsCountChanged: widget.onColumnsCountChanged,
+        hourHeight: widget.hourHeight,
+        onHourHeightChanged: widget.onHourHeightChanged,
+        enableLiveTimeIndicator: widget.enableLiveTimeIndicator,
+        onLiveTimeIndicatorChanged: widget.onLiveTimeIndicatorChanged,
+        highlightTodayColumn: widget.highlightTodayColumn,
+        onHighlightTodayColumnChanged: widget.onHighlightTodayColumnChanged,
+        autoCalculateWeek: widget.autoCalculateWeek,
+        onAutoCalculateWeekChanged: widget.onAutoCalculateWeekChanged,
+        autoExpandTo24Hours: widget.autoExpandTo24Hours,
+        onAutoExpandTo24HoursChanged: widget.onAutoExpandTo24HoursChanged,
+        semesterStartMonday: widget.semesterStartMonday,
+        onSemesterStartMondayChanged: widget.onSemesterStartMondayChanged,
+        devMessageReceiveMode: widget.devMessageReceiveMode,
+        onDevMessageReceiveModeChanged: widget.onDevMessageReceiveModeChanged,
+        hasUnreadBroadcast: widget.hasUnreadBroadcast,
+        onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
       );
     }
   }
 }
 
 // ============================================================================
-// 1. 电脑网页端：轻奢风工作台
+// 1. 电脑网页端：轻奢风工作台（含侧边栏「偏好设置与更新反馈」独立面板）
 // ============================================================================
 class DesktopLuxuryWorkspace extends StatefulWidget {
   final bool isEnglish;
@@ -1897,6 +2998,10 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
   final ValueChanged<bool> onAutoExpandTo24HoursChanged;
   final DateTime semesterStartMonday;
   final ValueChanged<DateTime> onSemesterStartMondayChanged;
+  final int devMessageReceiveMode;
+  final ValueChanged<int> onDevMessageReceiveModeChanged;
+  final bool hasUnreadBroadcast;
+  final VoidCallback onMarkAllBroadcastsRead;
 
   const DesktopLuxuryWorkspace({
     super.key,
@@ -1924,6 +3029,10 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
     required this.onAutoExpandTo24HoursChanged,
     required this.semesterStartMonday,
     required this.onSemesterStartMondayChanged,
+    required this.devMessageReceiveMode,
+    required this.onDevMessageReceiveModeChanged,
+    required this.hasUnreadBroadcast,
+    required this.onMarkAllBroadcastsRead,
   });
 
   @override
@@ -1931,7 +3040,7 @@ class DesktopLuxuryWorkspace extends StatefulWidget {
 }
 
 class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
-  int _sidebarIndex = 0;
+  int _sidebarIndex = 0; // 0: 课表视图, 1: 日程与待办, 2: 设置、更新与反馈中心
   String _viewMode = 'Week';
   late int _currentWeek;
   Course? _selectedCourse;
@@ -2066,6 +3175,25 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                         letterSpacing: 1.5,
                       ),
                     ),
+                    const Spacer(),
+                    if (widget.devMessageReceiveMode != 2)
+                      IconButton(
+                        tooltip: widget.isEnglish
+                            ? 'Developer Messages & Guides'
+                            : '开发者更新信息与使用指导',
+                        onPressed: () => showDeveloperInboxDialog(
+                          context,
+                          widget.isEnglish,
+                          widget.devMessageReceiveMode,
+                          widget.onMarkAllBroadcastsRead,
+                        ),
+                        icon: Badge(
+                          isLabelVisible:
+                              widget.hasUnreadBroadcast &&
+                              widget.devMessageReceiveMode == 0,
+                          child: const Icon(Icons.notifications_none, size: 20),
+                        ),
+                      ),
                   ],
                 ),
                 const SizedBox(height: 16),
@@ -2083,6 +3211,14 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                   _sidebarIndex == 1,
                   () {
                     setState(() => _sidebarIndex = 1);
+                  },
+                ),
+                _buildSidebarItem(
+                  Icons.settings_outlined,
+                  widget.isEnglish ? 'Settings & Updates' : '设置、更新与反馈',
+                  _sidebarIndex == 2,
+                  () {
+                    setState(() => _sidebarIndex = 2);
                   },
                 ),
                 const Divider(height: 16),
@@ -2154,28 +3290,6 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                           style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        subtitle: InkWell(
-                          onTap: () async {
-                            final picked = await showDatePicker(
-                              context: context,
-                              initialDate: widget.semesterStartMonday,
-                              firstDate: DateTime(2024),
-                              lastDate: DateTime(2030),
-                            );
-                            if (picked != null) {
-                              widget.onSemesterStartMondayChanged(picked);
-                            }
-                          },
-                          child: Text(
-                            widget.isEnglish
-                                ? 'Week 1 Mon: ${formatDateKey(widget.semesterStartMonday)} (Tap to edit)'
-                                : '第1周周一: ${formatDateKey(widget.semesterStartMonday)} (点击修改)',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Colors.blueAccent,
-                            ),
                           ),
                         ),
                         value: widget.autoCalculateWeek,
@@ -2284,34 +3398,6 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
                         onChanged: (val) =>
                             widget.onColumnsCountChanged(val.toInt()),
                       ),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            widget.isEnglish ? 'Hour Height' : '每小时时间格高度',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.grey,
-                            ),
-                          ),
-                          Text(
-                            '${widget.hourHeight.toInt()} px',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.blueAccent,
-                            ),
-                          ),
-                        ],
-                      ),
-                      Slider(
-                        value: widget.hourHeight,
-                        min: 60.0,
-                        max: 120.0,
-                        divisions: 6,
-                        onChanged: widget.onHourHeightChanged,
-                      ),
                     ],
                   ),
                 ),
@@ -2417,6 +3503,44 @@ class _DesktopLuxuryWorkspaceState extends State<DesktopLuxuryWorkspace> {
             Expanded(
               flex: 4,
               child: SchedulePage(isEnglish: widget.isEnglish, isDesktop: true),
+            )
+          else if (_sidebarIndex == 2)
+            Expanded(
+              flex: 4,
+              child: ProfilePage(
+                isEnglish: widget.isEnglish,
+                onThemeChanged: widget.onThemeChanged,
+                onLanguageChanged: widget.onLanguageChanged,
+                currentThemeMode: widget.currentThemeMode,
+                isSimpleMode: widget.isSimpleMode,
+                onSimpleModeChanged: widget.onSimpleModeChanged,
+                showNonCurrentWeek: widget.showNonCurrentWeek,
+                onShowNonCurrentWeekChanged: widget.onShowNonCurrentWeekChanged,
+                visibleWeekdays: widget.visibleWeekdays,
+                columnsCount: widget.columnsCount,
+                onVisibleWeekdaysChanged: widget.onVisibleWeekdaysChanged,
+                onColumnsCountChanged: widget.onColumnsCountChanged,
+                hourHeight: widget.hourHeight,
+                onHourHeightChanged: widget.onHourHeightChanged,
+                enableLiveTimeIndicator: widget.enableLiveTimeIndicator,
+                onLiveTimeIndicatorChanged: widget.onLiveTimeIndicatorChanged,
+                highlightTodayColumn: widget.highlightTodayColumn,
+                onHighlightTodayColumnChanged:
+                    widget.onHighlightTodayColumnChanged,
+                autoCalculateWeek: widget.autoCalculateWeek,
+                onAutoCalculateWeekChanged: widget.onAutoCalculateWeekChanged,
+                autoExpandTo24Hours: widget.autoExpandTo24Hours,
+                onAutoExpandTo24HoursChanged:
+                    widget.onAutoExpandTo24HoursChanged,
+                semesterStartMonday: widget.semesterStartMonday,
+                onSemesterStartMondayChanged:
+                    widget.onSemesterStartMondayChanged,
+                devMessageReceiveMode: widget.devMessageReceiveMode,
+                onDevMessageReceiveModeChanged:
+                    widget.onDevMessageReceiveModeChanged,
+                hasUnreadBroadcast: widget.hasUnreadBroadcast,
+                onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
+              ),
             )
           else ...[
             Expanded(
@@ -3083,6 +4207,10 @@ class MobileMainScreen extends StatefulWidget {
   final ValueChanged<bool> onAutoExpandTo24HoursChanged;
   final DateTime semesterStartMonday;
   final ValueChanged<DateTime> onSemesterStartMondayChanged;
+  final int devMessageReceiveMode;
+  final ValueChanged<int> onDevMessageReceiveModeChanged;
+  final bool hasUnreadBroadcast;
+  final VoidCallback onMarkAllBroadcastsRead;
 
   const MobileMainScreen({
     super.key,
@@ -3110,6 +4238,10 @@ class MobileMainScreen extends StatefulWidget {
     required this.onAutoExpandTo24HoursChanged,
     required this.semesterStartMonday,
     required this.onSemesterStartMondayChanged,
+    required this.devMessageReceiveMode,
+    required this.onDevMessageReceiveModeChanged,
+    required this.hasUnreadBroadcast,
+    required this.onMarkAllBroadcastsRead,
   });
 
   @override
@@ -3138,6 +4270,9 @@ class _MobileMainScreenState extends State<MobileMainScreen> {
         autoCalculateWeek: widget.autoCalculateWeek,
         autoExpandTo24Hours: widget.autoExpandTo24Hours,
         semesterStartMonday: widget.semesterStartMonday,
+        devMessageReceiveMode: widget.devMessageReceiveMode,
+        hasUnreadBroadcast: widget.hasUnreadBroadcast,
+        onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
       ),
       ProfilePage(
         isEnglish: widget.isEnglish,
@@ -3164,6 +4299,10 @@ class _MobileMainScreenState extends State<MobileMainScreen> {
         onAutoExpandTo24HoursChanged: widget.onAutoExpandTo24HoursChanged,
         semesterStartMonday: widget.semesterStartMonday,
         onSemesterStartMondayChanged: widget.onSemesterStartMondayChanged,
+        devMessageReceiveMode: widget.devMessageReceiveMode,
+        onDevMessageReceiveModeChanged: widget.onDevMessageReceiveModeChanged,
+        hasUnreadBroadcast: widget.hasUnreadBroadcast,
+        onMarkAllBroadcastsRead: widget.onMarkAllBroadcastsRead,
       ),
     ];
 
@@ -3182,7 +4321,12 @@ class _MobileMainScreenState extends State<MobileMainScreen> {
             label: labels[1],
           ),
           BottomNavigationBarItem(
-            icon: const Icon(Icons.person),
+            icon: Badge(
+              isLabelVisible:
+                  widget.hasUnreadBroadcast &&
+                  widget.devMessageReceiveMode == 0,
+              child: const Icon(Icons.person),
+            ),
             label: labels[2],
           ),
         ],
@@ -3714,6 +4858,9 @@ class MobileTimetablePage extends StatefulWidget {
   final bool autoCalculateWeek;
   final bool autoExpandTo24Hours;
   final DateTime semesterStartMonday;
+  final int devMessageReceiveMode;
+  final bool hasUnreadBroadcast;
+  final VoidCallback onMarkAllBroadcastsRead;
 
   const MobileTimetablePage({
     super.key,
@@ -3728,6 +4875,9 @@ class MobileTimetablePage extends StatefulWidget {
     required this.autoCalculateWeek,
     required this.autoExpandTo24Hours,
     required this.semesterStartMonday,
+    required this.devMessageReceiveMode,
+    required this.hasUnreadBroadcast,
+    required this.onMarkAllBroadcastsRead,
   });
 
   @override
@@ -3897,6 +5047,25 @@ class _MobileTimetablePageState extends State<MobileTimetablePage> {
     final autoWeek = _systemCurrentWeek;
     return Scaffold(
       appBar: AppBar(
+        leading: widget.devMessageReceiveMode == 2
+            ? null
+            : IconButton(
+                tooltip: widget.isEnglish
+                    ? 'Developer Messages & Guides'
+                    : '开发者更新信息与使用指导',
+                onPressed: () => showDeveloperInboxDialog(
+                  context,
+                  widget.isEnglish,
+                  widget.devMessageReceiveMode,
+                  widget.onMarkAllBroadcastsRead,
+                ),
+                icon: Badge(
+                  isLabelVisible:
+                      widget.hasUnreadBroadcast &&
+                      widget.devMessageReceiveMode == 0,
+                  child: const Icon(Icons.campaign_outlined),
+                ),
+              ),
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -4516,7 +5685,7 @@ class _AddCoursePageState extends State<AddCoursePage> {
 }
 
 // ============================================================================
-// 4. 我的与设置（含常驻 07:00-22:00 与越界课程自动扩展 24 小时开关）
+// 4. 我的与设置（全面集成：检查更新、用户反馈渠道、开发者群发后台、三档信息接收模式）
 // ============================================================================
 class ProfilePage extends StatelessWidget {
   final bool isEnglish;
@@ -4543,6 +5712,10 @@ class ProfilePage extends StatelessWidget {
   final ValueChanged<bool> onAutoExpandTo24HoursChanged;
   final DateTime semesterStartMonday;
   final ValueChanged<DateTime> onSemesterStartMondayChanged;
+  final int devMessageReceiveMode;
+  final ValueChanged<int> onDevMessageReceiveModeChanged;
+  final bool hasUnreadBroadcast;
+  final VoidCallback onMarkAllBroadcastsRead;
 
   const ProfilePage({
     super.key,
@@ -4570,6 +5743,10 @@ class ProfilePage extends StatelessWidget {
     required this.onAutoExpandTo24HoursChanged,
     required this.semesterStartMonday,
     required this.onSemesterStartMondayChanged,
+    required this.devMessageReceiveMode,
+    required this.onDevMessageReceiveModeChanged,
+    required this.hasUnreadBroadcast,
+    required this.onMarkAllBroadcastsRead,
   });
 
   @override
@@ -4596,7 +5773,14 @@ class ProfilePage extends StatelessWidget {
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 4),
+          Center(
+            child: Text(
+              'Version v$kCurrentAppVersion',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ),
+          const SizedBox(height: 16),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: ElevatedButton.icon(
@@ -4617,8 +5801,192 @@ class ProfilePage extends StatelessWidget {
               onPressed: () => showExcelImportAndSyncModal(context, isEnglish),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           const Divider(),
+
+          // ==================================================================
+          // 新增核心专区：版本更新、用户反馈渠道、开发者广播中心与三档消息接收模式
+          // ==================================================================
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Text(
+              isEnglish
+                  ? 'Updates, Feedback & Developer Broadcasts'
+                  : '版本更新、用户反馈与开发者信息中心',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: Colors.blueAccent,
+              ),
+            ),
+          ),
+          // 1. 应用内开发者信息接收策略（三档选择：接收并提醒 / 接收但不提醒 / 不接收）
+          ListTile(
+            leading: const Icon(
+              Icons.notifications_active_outlined,
+              color: Colors.amber,
+            ),
+            title: Text(isEnglish ? 'In-App Developer Messages' : '接收应用内开发者信息'),
+            subtitle: Text(
+              devMessageReceiveMode == 0
+                  ? (isEnglish
+                        ? 'Receive & Notify (Pop-up & Badge)'
+                        : '当前：接收并提醒（收到更新指导时弹窗+红点提醒）')
+                  : devMessageReceiveMode == 1
+                  ? (isEnglish
+                        ? 'Receive Silently (Inbox only, no pop-up)'
+                        : '当前：接收但不提醒（静默存入消息箱，绝不打扰）')
+                  : (isEnglish
+                        ? 'Do Not Receive (Turned off)'
+                        : '当前：不接收（彻底关闭开发者应用内广播）'),
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            trailing: DropdownButton<int>(
+              value: devMessageReceiveMode,
+              underline: const SizedBox(),
+              items: [
+                DropdownMenuItem(
+                  value: 0,
+                  child: Text(isEnglish ? 'Receive & Notify' : '接收并提醒'),
+                ),
+                DropdownMenuItem(
+                  value: 1,
+                  child: Text(isEnglish ? 'Receive Silently' : '接收但不提醒'),
+                ),
+                DropdownMenuItem(
+                  value: 2,
+                  child: Text(isEnglish ? 'Do Not Receive' : '不接收'),
+                ),
+              ],
+              onChanged: (val) {
+                if (val != null) {
+                  onDevMessageReceiveModeChanged(val);
+                }
+              },
+            ),
+          ),
+          // 2. 查看开发者推送的更新信息与使用指导收件箱
+          if (devMessageReceiveMode != 2)
+            ListTile(
+              leading: Badge(
+                isLabelVisible:
+                    hasUnreadBroadcast && devMessageReceiveMode == 0,
+                child: const Icon(Icons.campaign_outlined, color: Colors.teal),
+              ),
+              title: Text(
+                isEnglish
+                    ? 'Developer Updates & Usage Guides'
+                    : '查看开发者更新信息与使用指导',
+              ),
+              subtitle: Text(
+                isEnglish
+                    ? '${courseSyncCenter.broadcasts.length} official guides & update announcements'
+                    : '共 ${courseSyncCenter.broadcasts.length} 条来自开发者的更新说明与操作指南',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => showDeveloperInboxDialog(
+                context,
+                isEnglish,
+                devMessageReceiveMode,
+                onMarkAllBroadcastsRead,
+              ),
+            ),
+          // 3. 联网检查更新
+          ListTile(
+            leading: const Icon(Icons.system_update, color: Colors.blueAccent),
+            title: Text(isEnglish ? 'Check for Updates' : '检查更新（联网获取最新版本）'),
+            subtitle: Text(
+              isEnglish
+                  ? 'Current: v$kCurrentAppVersion · Latest Online: v${courseSyncCenter.latestRemoteVersion}'
+                  : '当前版本：v$kCurrentAppVersion · 云端最新：v${courseSyncCenter.latestRemoteVersion}',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            trailing: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.redAccent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                isEnglish ? 'NEW' : '有新版本',
+                style: const TextStyle(
+                  fontSize: 10,
+                  color: Colors.redAccent,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            onTap: () => showCheckForUpdatesDialog(context, isEnglish),
+          ),
+          // 4. 用户反馈渠道（向开发者发送改进提议和信息）
+          ListTile(
+            leading: const Icon(
+              Icons.rate_review_outlined,
+              color: Colors.green,
+            ),
+            title: Text(
+              isEnglish ? 'User Feedback & Suggestions' : '用户反馈渠道（向开发者发送改进提议）',
+            ),
+            subtitle: Text(
+              isEnglish
+                  ? 'Submit feature requests, bug reports or contact developer'
+                  : '向开发者提交新功能提议、问题反馈或体验改进意见',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showUserFeedbackDialog(context, isEnglish),
+          ),
+          // 5. 开发者专属：一键向用户群体发送更新信息和使用指导
+          ListTile(
+            leading: const Icon(
+              Icons.admin_panel_settings_outlined,
+              color: Colors.deepPurpleAccent,
+            ),
+            title: Text(
+              isEnglish
+                  ? 'Developer Broadcast Console'
+                  : '开发者群发控制台（一键发送更新与使用指导）',
+            ),
+            subtitle: Text(
+              isEnglish
+                  ? 'Push update announcements & usage guides to user group'
+                  : '开发者专属：向全体用户一键推送更新通知、下载直链与使用指导',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              showDeveloperBroadcastConsole(context, isEnglish, (msg) {
+                if (devMessageReceiveMode == 0) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      backgroundColor: Colors.deepPurpleAccent,
+                      content: Text(
+                        isEnglish
+                            ? 'Broadcast pushed & notified: ${msg.title}'
+                            : '已向用户群发并触发提醒：${msg.title}',
+                      ),
+                    ),
+                  );
+                } else if (devMessageReceiveMode == 1) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        isEnglish
+                            ? 'Broadcast silently delivered to inbox.'
+                            : '已静默推送至消息中心（当前为「接收但不提醒」模式）',
+                      ),
+                    ),
+                  );
+                }
+              });
+            },
+          ),
+          const Divider(),
+
+          // ==================================================================
+          // 基础界面与时间轴设置
+          // ==================================================================
           ListTile(
             leading: const Icon(Icons.language),
             title: Text(isEnglish ? 'Language' : '语言设置'),
@@ -4673,7 +6041,6 @@ class ProfilePage extends StatelessWidget {
               ),
             ),
           ),
-          // 新增：当课表存在 07:00-22:00 以外的课程时，自动扩展为 24 小时
           SwitchListTile(
             secondary: const Icon(
               Icons.unfold_more,
@@ -4693,7 +6060,6 @@ class ProfilePage extends StatelessWidget {
             value: autoExpandTo24Hours,
             onChanged: onAutoExpandTo24HoursChanged,
           ),
-          // 1. 课表时间轴上的当前时间红线指示器
           SwitchListTile(
             secondary: const Icon(Icons.timeline, color: Colors.redAccent),
             title: Text(
@@ -4708,7 +6074,6 @@ class ProfilePage extends StatelessWidget {
             value: enableLiveTimeIndicator,
             onChanged: onLiveTimeIndicatorChanged,
           ),
-          // 2. 今日所在列专属高亮与具体日期表头
           SwitchListTile(
             secondary: const Icon(Icons.today, color: Colors.blueAccent),
             title: Text(
@@ -4725,7 +6090,6 @@ class ProfilePage extends StatelessWidget {
             value: highlightTodayColumn,
             onChanged: onHighlightTodayColumnChanged,
           ),
-          // 3. 根据开学第一周日期自动推算当前第几周
           SwitchListTile(
             secondary: const Icon(Icons.auto_mode, color: Colors.green),
             title: Text(
