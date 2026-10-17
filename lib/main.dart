@@ -241,7 +241,7 @@ class CourseSyncController extends ChangeNotifier {
   List<DeveloperBroadcastMessage> _broadcasts = [];
   List<Map<String, String>> _localFeedbackHistory = [];
 
-  String get installedVersion => '1.2.0';
+  String get installedVersion => '1.3.0';
 
   String _latestRemoteVersion = '1.2.0';
   String _latestDownloadUrl =
@@ -1664,7 +1664,12 @@ Future<void> showCheckForUpdatesDialog(
           Future<void> startInAppInstall() async {
             final customUrl = courseSyncCenter.latestDownloadUrl.trim();
             if (customUrl.isNotEmpty && customUrl.startsWith('http')) {
-              final uri = Uri.tryParse(customUrl);
+              final cacheBuster =
+                  'v=$latestVer&t=${DateTime.now().millisecondsSinceEpoch}';
+              final fullUrl = customUrl.contains('?')
+                  ? '$customUrl&$cacheBuster'
+                  : '$customUrl?$cacheBuster';
+              final uri = Uri.tryParse(fullUrl);
               if (uri != null && await canLaunchUrl(uri)) {
                 await launchUrl(uri, mode: LaunchMode.externalApplication);
               }
